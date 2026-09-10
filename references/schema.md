@@ -84,15 +84,16 @@ remote has no `portable` and behaves exactly as it did before. See
 
 ## Containment
 
-Containment is derived from paths, so a monorepo root is a string prefix of its
-modules and needs no stored edge — always accurate, never maintained. It is
-derived from `paths`, not from `id`: `id` may be a path recorded on another
+Containment needs no stored edge: a monorepo root is a string prefix of its
+modules, so it is derived — always accurate, never maintained. It is derived
+from `paths`, not from `id`: `id` may be a path recorded on another
 machine, and comparing this machine's directory against a Windows key would
 silently report no containment. Comparison is path-boundary aware:
 `/repo-elsewhere` is not inside `/repo`.
 
 The three helpers take the info dict from `project_info`, whose `id` is the
-graph key and whose `path` is this machine's directory:
+graph key and whose `path` is this machine's directory. Results are ordered by
+the local path that matched, never by `id` — a foreign `id` is not a depth:
 
 - `enclosing(s, info)` — projects containing this one, outermost first.
 - `contained(s, info)` — modules inside this one.
@@ -134,10 +135,14 @@ JSON object per line, appended and fsync'd before the graph is touched.
  "chose":["postgres"],"rejected":["sqlite"],"supersedes":[]}
 ```
 
-`op` is `record` or `principle`. `precedent.py rebuild` replays the file in order, so
+`op` is `record`, `project_tags`, `tag_merge`, `regret` or `principle`; the
+pre-tag `project_type` and the retired `tags_distinct` are still replayed so old
+journals keep working. `precedent.py rebuild` replays the file in order, so
 entries must stay append-only — editing or reordering lines rewrites history.
 
 `project_path` and `portable` are how a replay on a second machine resolves onto
-the project that is already there instead of inventing another. A line written
-before they existed carries neither, and falls back to `project_id` — the native
-path — exactly as it did then.
+the project that is already there instead of inventing another. **Both `record`
+and `project_tags` lines carry them**, and `replay_entry` resolves through them
+on either — a tag line that arrived without them would create a second node for
+the same repo. A line written before they existed carries neither, and falls
+back to `project_id` — the native path — exactly as it did then.

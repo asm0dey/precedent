@@ -311,8 +311,10 @@ def project_info(s: "Store", path: str, extra_tags: str = "") -> dict:
     info["path"] = info["id"]
     info["portable"] = portable_id(pathlib.Path(info["path"]))
     if info["portable"]:
+        # ORDER BY for the same reason as upsert_project's lookup, and the
+        # same one, so a read and the write beside it agree on which node.
         rows = s.q("""MATCH (p:Project {portable:$pp})
-                      RETURN p.id AS id, p.paths AS paths LIMIT 1""",
+                      RETURN p.id AS id, p.paths AS paths ORDER BY p.id LIMIT 1""",
                    {"pp": info["portable"]})
         if rows:
             info["id"], info["paths"] = rows[0]["id"], paths_of(rows[0])
@@ -357,10 +359,19 @@ def enclosing(s: "Store", info: dict) -> list[dict]:
     sep = os.sep
     here = info["path"]
     rows = s.q("MATCH (p:Project) RETURN p.id AS id, p.name AS name, p.paths AS paths")
-    out = [r for r in rows
-           if r["id"] != info["id"]
-           and any(here.startswith(p.rstrip(sep) + sep) for p in paths_of(r) or [r["id"]])]
-    return sorted(out, key=lambda r: len(r["id"]))
+    out = []
+    for r in rows:
+        if r["id"] == info["id"]:
+            continue
+        # Only the paths that actually contain this one, and only those may
+        # order the result. `len(id)` was a depth proxy while every id was a
+        # local path; once one node's id is a Windows path it is not a depth
+        # at all, and "outermost first" can come back inverted.
+        outer = [p.rstrip(sep) for p in paths_of(r) or [r["id"]]
+                 if here.startswith(p.rstrip(sep) + sep)]
+        if outer:
+            out.append((min(len(p) for p in outer), r))
+    return [r for _, r in sorted(out, key=lambda pair: pair[0])]
 
 
 def contained(s: "Store", info: dict) -> list[dict]:
@@ -368,10 +379,17 @@ def contained(s: "Store", info: dict) -> list[dict]:
     sep = os.sep
     here = info["path"].rstrip(sep) + sep
     rows = s.q("MATCH (p:Project) RETURN p.id AS id, p.name AS name, p.paths AS paths")
-    return sorted((r for r in rows
-                   if r["id"] != info["id"]
-                   and any(p.startswith(here) for p in paths_of(r) or [r["id"]])),
-                  key=lambda r: r["id"])
+    out = []
+    for r in rows:
+        if r["id"] == info["id"]:
+            continue
+        # Same rule as enclosing: order by the local path that matched, never
+        # by `id`. This list is printed, so a foreign id sorts the modules of
+        # a monorepo into a visibly arbitrary order.
+        inside = [p for p in paths_of(r) or [r["id"]] if p.startswith(here)]
+        if inside:
+            out.append((min(inside), r))
+    return [r for _, r in sorted(out, key=lambda pair: pair[0])]
 
 
 def same_tree(s: "Store", info: dict) -> set[str]:
@@ -464,7 +482,12 @@ def upsert_project(s: Store, info: dict) -> dict:
     local, portable = info["path"], info.get("portable")
     key = local
     if portable:
-        rows = s.q("MATCH (p:Project {portable:$pp}) RETURN p.id AS id LIMIT 1",
+        # ORDER BY, because LIMIT 1 without one picks arbitrarily. Two nodes
+        # can share a portable id: a graph rebuilt from journal lines that
+        # predate this task holds one path-keyed node per machine, and a later
+        # write on each stamps the same portable onto both.
+        rows = s.q("""MATCH (p:Project {portable:$pp})
+                      RETURN p.id AS id ORDER BY p.id LIMIT 1""",
                    {"pp": portable})
         if rows:
             key = rows[0]["id"]
@@ -477,9 +500,11 @@ def upsert_project(s: Store, info: dict) -> dict:
     row = s.q("MATCH (p:Project {id:$id}) RETURN p.paths AS paths", {"id": key})[0]
     known = paths_of(row)
     if local not in known:
-        known.append(local)
+        # Sorted before it is both stored and returned: two representations of
+        # one fact is how the next reader gets it wrong.
+        known = sorted(known + [local])
         s.q("MATCH (p:Project {id:$id}) SET p.paths=$paths",
-            {"id": key, "paths": "\n".join(sorted(known))})
+            {"id": key, "paths": "\n".join(known)})
     info["id"], info["paths"] = key, known
     return info
 
@@ -1401,13 +1426,25 @@ def _check_projects(s: Store) -> None:
     assert [r["id"] for r in contained(s, root_info)] == [mod], contained(s, root_info)
     assert enclosing(s, {"id": sibling, "path": sibling}) == [], \
         "a shared name prefix is not containment"
+
+    # A project first seen on another machine keeps that machine's path as its
+    # id, so `id` is not a depth and cannot order containment: len("C:\\m")
+    # would sort this module ahead of the root that contains it. Ordering has
+    # to come from the local paths that actually matched.
+    win, mid = "C:\\m", root + "/mid"
+    for path in (win, mid):        # first seen on Windows, then seen here
+        upsert_project(s, {"id": win, "path": path, "name": "mid",
+                           "portable": "github.com/asm0dey/selftest-c"})
+    deep = mid + "/deep"
+    assert [r["name"] for r in enclosing(s, {"id": deep, "path": deep})] \
+        == ["root", "mid"], "outermost first, ordered by the containing local path"
     assert effective_tags(s, {**mod_info, "tags": ["selftest-java"]}) \
         == ["selftest-java", "selftest-monorepo"], "a module inherits enclosing tags"
     kin3 = {r["id"] for r in neighbours(s, {**mod_info, "tags": ["selftest-java"]})}
     assert sibling in kin3, "comparable work outside the tree must count as kin"
     assert root not in kin3, "the enclosing project is structure, not precedent"
     assert mod not in kin3, "a project is not its own kin"
-    for pid in (proj, other, root, mod, sibling):
+    for pid in (proj, other, root, mod, sibling, win):
         s.q("MATCH (p:Project {id:$id}) DETACH DELETE p", {"id": pid})
     for t in ("selftest-monorepo", "selftest-backend", "selftest-java"):
         s.q("""MATCH (n:Tag {name:$n}) WHERE NOT EXISTS { MATCH (n)<--() }
@@ -1433,9 +1470,13 @@ def _check_decisions(s: Store) -> None:
 
     # The backfill nudge fires in a repo the graph has never seen, and nowhere
     # else — a bare directory is not a project worth prompting about.
-    assert not worth_backfilling(s, {"path": str(tmp)}), "a non-repo must not be nudged"
+    # Shaped like a real info dict, id and all: worth_backfilling reads only
+    # `path`, but a fixture missing `id` is a template for a KeyError the next
+    # time one of these is passed to a containment helper.
+    proj_info = {"id": str(tmp), "path": str(tmp)}
+    assert not worth_backfilling(s, proj_info), "a non-repo must not be nudged"
     (tmp / ".git").mkdir(exist_ok=True)
-    assert worth_backfilling(s, {"path": str(tmp)}), "a repo with a populated graph must be"
+    assert worth_backfilling(s, proj_info), "a repo with a populated graph must be"
     (tmp / ".git").rmdir()
 
     d2 = {**d, "id": "selftest-2", "chose": ["sqlite"], "supersedes": ["selftest-1"]}
