@@ -9,7 +9,7 @@ source:
 artifacts:
   skills:
     - id: precedent
-      path: adapters/claude/SKILL.md
+      path: adapters/claude
   scripts:
     - id: precedent-cli
       path: scripts/precedent.py
