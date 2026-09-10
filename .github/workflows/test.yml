@@ -30,7 +30,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.0.1  # no floating major tag exists; pin exact
       - name: selftest
         shell: bash
         # The value is double-quoted, which is what keeps it safe on
@@ -68,6 +68,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.0.1  # no floating major tag exists; pin exact
       - name: plugin.json is current
         run: uv run scripts/gen-plugin-json.py --check
