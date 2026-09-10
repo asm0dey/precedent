@@ -244,6 +244,19 @@ def vocabulary(s: "Store") -> list[dict]:
                   ORDER BY projects DESC, tag""")
 
 
+def topic_vocabulary(s: "Store") -> list[dict]:
+    """Topics already in use, commonest first — the menu `check` picks from.
+
+    Topics are the key `check` matches on, and matching is exact. The
+    caller invents the word fresh each session, so a synonym returns
+    nothing; showing the vocabulary is how it corrects itself.
+    """
+    return s.q("""MATCH (d:Decision)-[:ABOUT]->(t:Topic)
+                  WHERE d.status='active'
+                  RETURN t.name AS topic, count(DISTINCT d) AS decisions
+                  ORDER BY decisions DESC, topic""")
+
+
 def enclosing(s: "Store", project_id: str) -> list[dict]:
     """Projects that physically contain this one, outermost first.
 
@@ -644,7 +657,18 @@ def cmd_check(a, s: Store) -> None:
         if r["why"]:
             print(f"     why: {r['why']}")
     if not rows:
-        print("  nothing recorded — this is new ground")
+        print("  nothing recorded under this exact word.")
+        known = topic_vocabulary(s)
+        if known:
+            print("\n== topics in use ==")
+            for r in known:
+                print(f"  {r['topic']:<24} {r['decisions']} decision(s)")
+            print("\n  matching is exact, so a synonym finds nothing. If one of"
+                  " these is the same question, re-run with it. If none is,"
+                  " this is new ground.")
+        else:
+            print("  no decisions recorded anywhere yet — this is new ground.")
+        return
 
     if not a.chose:
         return
@@ -1645,6 +1669,30 @@ def _check_journal(s: Store) -> None:
     s.q("MATCH (n) WHERE n.id STARTS WITH 'selftest-noversion' DETACH DELETE n")
 
 
+def _check_verdicts(s: Store) -> None:
+    """`clear` must mean 'I searched and your history is silent', never
+    'you typed a word I have never seen'. Reproduced before the fix:
+    `check --topic database` against a graph holding the same decision
+    under `persistence` printed `new ground` and then `clear`.
+    """
+    d = {"id": "selftest-v1", "title": "T", "statement": "T",
+         "rationale": "concurrent writers", "scope": "architecture",
+         "created": today(), "project_id": "/tmp/precedent-selftest-v",
+         "project_name": "selftest-v", "tags": ["selftest-v-tag"],
+         "topics": ["selftest-persistence"], "chose": ["postgres"],
+         "rejected": ["sqlite"], "supersedes": []}
+    write_decision(s, d)
+    try:
+        topics = [r["topic"] for r in topic_vocabulary(s)]
+        assert "selftest-persistence" in topics, topics
+    finally:
+        s.q("MATCH (n) WHERE n.id STARTS WITH 'selftest-v' DETACH DELETE n")
+        s.q("""MATCH (p:Project {id:'/tmp/precedent-selftest-v'}) DETACH DELETE p""")
+        for name in ("selftest-persistence", "postgres", "sqlite", "selftest-v-tag"):
+            s.q("""MATCH (n) WHERE (n:Topic OR n:Option OR n:Tag) AND n.name = $name
+                     AND NOT EXISTS { MATCH (n)<--() } DETACH DELETE n""", {"name": name})
+
+
 def cmd_selftest(a, s: Store) -> None:
     """One runnable check over the paths that contain real logic.
 
@@ -1663,6 +1711,7 @@ def cmd_selftest(a, s: Store) -> None:
     _check_journal(s)
     _check_lock_modes()
     _check_grafeo_readers()
+    _check_verdicts(s)
     after = s.q("MATCH (n) RETURN count(n) AS n")[0]["n"]
     assert after == before, f"selftest changed node count {before} -> {after}"
     print(f"selftest ok ({before} nodes, unchanged)")
