@@ -1976,128 +1976,170 @@ def _check_store(s: Store) -> None:
 
 
 def _check_grafeo_readers() -> None:
-    """Readers must not observe a torn write.
+    """A reader must never observe a torn write, under the exact lock Store uses.
 
-    The read-write split lets readers run while a writer holds the graph open.
-    grafeo is v0.5 and its issue #405 documents writers silently dropping
-    writes (120 across 6 processes, 60 stored, nothing raised); nothing
-    documented reader isolation. So this proves it rather than assuming it:
-    a writer process loops writes whose two properties must always agree, and
-    readers assert they never see a row where they disagree.
+    Earlier versions of this check opened grafeo directly, unlocked, on the
+    theory that testing something harder than the lock permits was
+    conservative. It was too conservative: it proved a property precedent
+    does not rely on and grafeo does not provide on macOS/Windows, no matter
+    what wraps the writer's statement. Wrapping the writer in a transaction
+    (`Store.q()`'s own transaction, see its comment) was tried and pushed as
+    the fix for that harness — CI still teared on macos-latest and
+    windows-latest. That is the decisive fact: a transaction changes what the
+    SAME process can see afterward, not what a SECOND process sees while the
+    WAL is mid-append, so it could never have closed this gap. This version
+    retargets the check at the guarantee `Store` actually depends on —
+    mutual exclusion between readers and writers — instead of at grafeo's own
+    cross-process isolation, which this project does not use and cannot rely
+    on to begin with.
 
-    This check caught a real tear, not just a hypothetical one: `MERGE ... SET
-    n.a=$i, n.b=$i` is one Cypher statement but grafeo's WAL records ONE
-    PROPERTY PER RECORD (`WalRecord::SetNodeProperty`), so a bare (untransacted)
-    writer produces two separate WAL records per iteration with no commit
-    boundary joining them. On CI this teared on macos-latest and
-    windows-latest but not ubuntu-latest — measured locally (4 readers x 4s
-    per cell, macOS): bare writer + bare reader = 755 reads, 16 torn; writer
-    in a transaction = 0 torn; reader in a transaction = 0 torn; both = 0
-    torn. A transaction on either side is sufficient; this harness puts one on
-    the writer because that is what `Store.q()` now does for every write in
-    precedent proper (see its comment) — the writer here models precedent's
-    actual write path, not a synthetic best case. Readers stay bare: they are
-    still testing what an unlocked, non-transactional reader observes, which
-    is the harder case the read lock relies on.
+    Why the lock is load-bearing and not an optimisation, measured rather
+    than assumed: unlocked, on macOS and Windows, a reader that opens the db
+    mid-write observes `[[N, N-1]]` — the new value of one property beside
+    the stale value of the other. grafeo's WAL records ONE PROPERTY PER
+    RECORD (`WalRecord::SetNodeProperty`): `SET n.a=$i, n.b=$i` is one Cypher
+    statement but two WAL records, and there is no cross-process commit
+    boundary joining them — a transaction only ever bounded what the writer's
+    own process could see. Linux did not reproduce the tear in that
+    measurement; that is an absence, not a guarantee it cannot happen there.
+    So: a reader and a writer must never touch the same grafeo db
+    concurrently. Do not "optimise" `Store`'s `ReadWriteLock` to permit that
+    overlap — this is exactly the failure it exists to prevent.
 
-    Deliberately unlocked, and deliberately harsher than production.
-    ReadWriteLock grants N readers OR one exclusive writer, so under the lock
-    a reader and a writer are never concurrent; this runs them concurrently
-    anyway. That is conservative on purpose — do not delete the check as
-    unrealistic, it tests something strictly harder than the lock permits.
+    The lock itself was measured before it was trusted, not just assumed
+    safe (grafeo#405): 6 concurrent writers with no lock attempted 6329
+    writes, stored 1311, raised nothing — 79% gone in silence. 6 concurrent
+    readers with no lock: 27662 opens, nothing lost. Concurrent WAL appends
+    by readers are benign; concurrent data writes are not — that asymmetry is
+    the entire justification for the read/write split in `Store.__init__`.
 
-    It has to, because a "reader" here reads no decision but is not passive at
-    the file level: opening a grafeo db appends ~10 bytes to its write-ahead
-    log before any query runs, and closing appends more. Which sounds like it
-    sinks the whole split — N processes writing at once is what the lock exists
-    to stop — so it was measured rather than argued, unlocked, 3s each:
+    So both sides here now run the exact lifecycle a real `precedent`
+    invocation runs, through `Store` itself (loaded from this file by path,
+    since a subprocess cannot just `import precedent`): the writer loops, and
+    each iteration is its OWN `Store(home, write=True)` — acquire, open,
+    write both properties, close, release — never one Store held across the
+    whole loop, which would starve the readers for the run's entire length
+    and prove nothing. Readers loop the same way with `write=False`. Under
+    `ReadWriteLock` a writer is exclusive against readers, so the two are
+    never concurrent — this is no longer harsher than production, it IS
+    production's contract, exercised the way `record`/`check`/etc. exercise
+    it: one lock acquisition per command.
 
-        6 concurrent writers:  attempted 6329, stored 1311, seed intact
-        6 concurrent readers:  27662 opens, seed intact, WAL grew to 290KB
+    Each reader still reopens the db every round rather than opening once and
+    looping: a reader that opens once would see one frozen value for as long
+    as the writer ran and could never observe a tear, so the check would pass
+    vacuously no matter what it was actually testing. Reopening every round
+    is also the true shape of every precedent command — open, query, close —
+    so this is fidelity, not extra paranoia.
 
-    The first row is grafeo#405 reproducing exactly: 79% of writes gone, none
-    raised. That is what makes the second row mean anything — the harness
-    demonstrably detects loss, and found none in 27,662 concurrent opens.
-    Concurrent WAL appends by readers are benign; concurrent data writes are
-    not, and the read lock rests entirely on that difference.
+    Two honesty guards survive from the unlocked version, because this one
+    needs them just as much: readers must have watched the writer's value
+    ADVANCE (more than one distinct value seen — a reader stuck on a single
+    frozen value could never tear and would pass for free), and the writer
+    must still be alive when the readers are reaped (a writer that quit early
+    means nothing was read under real contention). Both are asserted below.
 
-    Each reader reopens the db every round. That is not a detail — a reader
-    that opens once and loops sees a single frozen value however long the
-    writer runs, so it could never observe a tear and the check would pass
-    vacuously. Reopening is also the true shape of every precedent command:
-    open, query, close. Two independent guards keep the check honest: readers
-    must have seen the writer's value advance (more than one distinct value),
-    and the writer must still be running when they finish.
+    A back-to-back writer loop with no pacing — each iteration as fast as
+    the Store lifecycle allows — starved individual readers under this lock
+    for multiple seconds at a stretch: measured, one reader in roughly eight
+    runs came back having seen only 1 distinct value despite a multi-second
+    budget, because the lock's SQLite backing resolved five contending
+    connections unevenly rather than round-robin. A 5ms pause between writer
+    iterations (WRITE_PACE) fixed it outright — 10/10 runs at ~190-205
+    distinct values per reader and a stable ~2.0s total — and it makes the
+    harness more honest, not less: nothing issues real `precedent` commands
+    back-to-back at unthrottled loop speed, so unthrottled was the
+    unrealistic case, not the paced one.
+
+    This check can still fail, and has to be able to: it is now a regression
+    guard on the LOCKING MODEL, not on the log. If a later change lets a
+    reader and a writer overlap — a "read without waiting" shortcut, a lock
+    split too finely, anything that weakens the exclusivity above — the exact
+    tear measured above returns, and the assertion below is what catches it.
     """
     import subprocess
     import tempfile
 
     WRITE_BUDGET = 10.0  # wall clock, not iterations, so the run is bounded
-    READ_BUDGET = 1.2    # ends inside the writer's window, from both sides
+    READ_BUDGET = 1.5    # ends inside the writer's window, from both sides
     WARMUP = 0.4         # let the node exist before readers look for it
-    READERS = 4          # several appenders on one WAL, not just a pair
+    READERS = 4          # several Store(write=False) lifecycles, not just a pair
     STUCK = 5.0          # a reader past this is wedged, not slow
+    WRITE_PACE = 0.005   # see "back-to-back writer loop" above — this is load-bearing, not tidiness
     # WRITE_BUDGET is an upper bound nothing waits on: the writer is killed as
     # soon as the readers are reaped, so raising it costs no wall clock and
-    # only widens the margin behind the `writer.poll()` assertion below. At
-    # 3.0 the margin behind that assertion was ~1.4s, which four cold
-    # Python+grafeo process starts can eat on a loaded machine and Windows
-    # process spawn eats comfortably. Since the budget is free, it is 10.
+    # only widens the margin behind the `writer.poll()` assertion below.
+    # Since the budget is free, it is 10 — comfortably above the ~2s this
+    # check actually takes with WRITE_PACE in place.
 
+    precedent_path = str(pathlib.Path(__file__).resolve())
+
+    # A subprocess can't `import precedent` — this file is a script, not an
+    # installed package — so it loads this exact module by path instead.
+    # Both loops use real `Store`, not raw grafeo, so the lock they take is
+    # the one `main()` takes for every command.
     writer_src = (
-        "import sys, time, grafeo\n"
-        "g = grafeo.GrafeoDB(sys.argv[1])\n"
-        "end = time.monotonic() + float(sys.argv[2])\n"
+        "import sys, time, pathlib, importlib.util\n"
+        "spec = importlib.util.spec_from_file_location('precedent_under_test', sys.argv[1])\n"
+        "precedent = importlib.util.module_from_spec(spec)\n"
+        "spec.loader.exec_module(precedent)\n"
+        "home = pathlib.Path(sys.argv[2])\n"
+        "end = time.monotonic() + float(sys.argv[3])\n"
+        "pace = float(sys.argv[4])\n"
         "i = 0\n"
         "while time.monotonic() < end:\n"
         "    i += 1\n"
-        "    with g.begin_transaction() as tx:\n"
-        "        list(tx.execute(\"MERGE (n:RWProbe {id:'p'}) SET n.a=$i, n.b=$i "
-        "RETURN n.a AS a\", {\"i\": i}))\n"
-        "        tx.commit()\n"
-        "g.close()\n")
+        "    with precedent.Store(home, write=True) as s:\n"
+        "        s.q(\"MERGE (n:RWProbe {id:'p'}) SET n.a=$i, n.b=$i\", {'i': i})\n"
+        "    time.sleep(pace)\n"
+        "print(i, flush=True)\n")
 
     reader_src = (
-        "import json, sys, time, grafeo\n"
-        "end = time.monotonic() + float(sys.argv[2])\n"
+        "import sys, time, json, pathlib, importlib.util\n"
+        "spec = importlib.util.spec_from_file_location('precedent_under_test', sys.argv[1])\n"
+        "precedent = importlib.util.module_from_spec(spec)\n"
+        "spec.loader.exec_module(precedent)\n"
+        "home = pathlib.Path(sys.argv[2])\n"
+        "end = time.monotonic() + float(sys.argv[3])\n"
         "seen, torn = set(), []\n"
         "while time.monotonic() < end:\n"
-        "    g = grafeo.GrafeoDB(sys.argv[1])\n"
-        "    for r in g.execute(\"MATCH (n:RWProbe {id:'p'}) "
-        "RETURN n.a AS a, n.b AS b\"):\n"
-        "        seen.add(r['a'])\n"
-        "        if r['a'] != r['b']:\n"
-        "            torn.append([r['a'], r['b']])\n"
-        "    g.close()\n"
+        "    with precedent.Store(home, write=False) as s:\n"
+        "        for r in s.q(\"MATCH (n:RWProbe {id:'p'}) RETURN n.a AS a, n.b AS b\"):\n"
+        "            seen.add(r['a'])\n"
+        "            if r['a'] != r['b']:\n"
+        "                torn.append([r['a'], r['b']])\n"
         "print(json.dumps({'distinct': len(seen), 'torn': torn[:5]}), flush=True)\n")
 
     with tempfile.TemporaryDirectory() as tmp:
-        db = str(pathlib.Path(tmp) / "probe.db")
+        # A `home` for Store to build .lock/graph.db/journal.jsonl under —
+        # never the real store; each run gets a fresh, disposable one.
+        home = pathlib.Path(tmp) / "home"
         writer = subprocess.Popen(
-            [sys.executable, "-c", writer_src, db, str(WRITE_BUDGET)],
+            [sys.executable, "-c", writer_src, precedent_path, str(home),
+             str(WRITE_BUDGET), str(WRITE_PACE)],
             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
         readers: list[subprocess.Popen] = []
         try:
             time.sleep(WARMUP)
             for _ in range(READERS):
                 readers.append(subprocess.Popen(
-                    [sys.executable, "-c", reader_src, db, str(READ_BUDGET)],
+                    [sys.executable, "-c", reader_src, precedent_path, str(home), str(READ_BUDGET)],
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True))
             results = []
             for i, r in enumerate(readers):
                 # Bounded like every other wait here. A reader wedged inside
-                # g.execute under contention is the very thing this check
-                # probes, and it must fail loudly rather than hang the
-                # selftest; the finally below reaps it either way.
+                # Store's lock acquisition or a grafeo query under
+                # contention is the very thing this check probes, and it
+                # must fail loudly rather than hang the selftest; the
+                # finally below reaps it either way.
                 try:
                     out, err = r.communicate(timeout=READ_BUDGET + STUCK)
                 except subprocess.TimeoutExpired:
                     raise AssertionError(
                         f"reader {i} outlived a {READ_BUDGET:g}s budget by {STUCK:g}s — "
-                        "it is stuck in grafeo while a writer holds the graph open")
+                        "it is stuck acquiring Store's shared lock or inside grafeo")
                 assert r.returncode == 0, (
-                    f"reader {i} crashed while a writer held the graph open: "
-                    f"{err.strip()[-500:]}")
+                    f"reader {i} crashed while the writer was running: {err.strip()[-500:]}")
                 results.append(json.loads(out))
             if writer.poll() is not None:
                 raise AssertionError(
@@ -2105,8 +2147,9 @@ def _check_grafeo_readers() -> None:
                     f"under contention: {writer.communicate()[1].strip()[-500:]}")
             for i, res in enumerate(results):
                 assert not res["torn"], (
-                    f"reader {i} observed a torn write {res['torn']}: grafeo does not "
-                    "isolate a reader from a concurrent writer, so the read lock is unsafe")
+                    f"reader {i} observed a torn write {res['torn']}: a reader and a writer "
+                    "overlapped even though both went through Store's ReadWriteLock — "
+                    "the lock is no longer doing its job")
                 assert res["distinct"] > 1, (
                     f"reader {i} saw {res['distinct']} distinct value(s) — it never watched "
                     "the writer advance, so this check proved nothing")
