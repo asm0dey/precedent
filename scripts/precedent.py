@@ -714,7 +714,8 @@ def cmd_check(a, s: Store) -> None:
                         (d)-[:CHOSE]->(o:Option),
                         (d)-[:IN_PROJECT]->(p:Project)
                   WHERE d.status='active' AND o.name <> $o
-                  RETURN o.name AS other, count(DISTINCT p) AS n
+                  RETURN o.name AS other, count(DISTINCT p) AS n,
+                         collect(d.created) AS dates
                   ORDER BY n DESC LIMIT 3""", {"t": topic, "o": a.chose})
     ack = s.q("""MATCH (d:Decision)-[:ABOUT]->(:Topic {name:$t}),
                        (d)-[:IN_PROJECT]->(:Project {id:$pid})
@@ -723,13 +724,19 @@ def cmd_check(a, s: Store) -> None:
               {"t": topic, "pid": str(pathlib.Path(a.project).resolve())})
     diverged = [r for r in norm if r["n"] >= 2]
     for r in diverged:
+        # A count with no date weighs a choice from 2019 in a dead repo exactly
+        # as heavily as one from last month. The reader can discount it; the
+        # tool should not decide the history expired.
+        last = max([d for d in r["dates"] if d], default="")
+        age = f", last: {last[:7]}" if last else ""
         if ack:
             # Already argued out, in this project, on the record. Repeating the
             # warning here is how a useful signal becomes noise.
-            print(f"  DIVERGENCE from '{r['other']}' ({r['n']} projects) —"
+            print(f"  DIVERGENCE from '{r['other']}' ({r['n']} projects{age}) —"
                   f" acknowledged here: \"{ack[0]['why']}\"")
         else:
-            print(f"  DIVERGENCE: you chose '{r['other']}' for this in {r['n']} other projects")
+            print(f"  DIVERGENCE: you chose '{r['other']}' for this in"
+                  f" {r['n']} other projects{age}")
 
     violated = s.q("""MATCH (pr:Principle) WHERE pr.statement CONTAINS $t
                       RETURN pr.id AS id, pr.statement AS stmt""", {"t": topic})
@@ -1739,6 +1746,16 @@ def _check_verdicts(s: Store) -> None:
         assert "clear —" not in text, text
         assert "unrelated mistake" not in text, \
             f"a lesson on a different topic must not fire here:\n{text}"
+
+        out2 = io.StringIO()
+        args2 = _argparse.Namespace(topic="selftest-persistence",
+                                    chose="sqlite", project="/tmp")
+        s.q("MATCH (d:Decision) WHERE d.id STARTS WITH 'selftest-v' SET d.status='active'")
+        with contextlib.redirect_stdout(out2):
+            cmd_check(args2, s)
+        div = out2.getvalue()
+        assert "DIVERGENCE" in div, div
+        assert f"last: {today()[:7]}" in div, f"the norm must carry its age:\n{div}"
     finally:
         s.q("MATCH (l:Lesson {id:'selftest-v-lesson'}) DETACH DELETE l")
         s.q("MATCH (l:Lesson {id:'selftest-v-lesson-other'}) DETACH DELETE l")
