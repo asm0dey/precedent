@@ -132,13 +132,28 @@ JSON object per line, appended and fsync'd before the graph is touched.
  "created":"2026-09-10","project_id":"/home/u/proj","project_name":"proj",
  "project_path":"/home/u/proj","portable":"github.com/u/proj",
  "project_type":"telegram-bot","stack":"aiogram","topics":["persistence"],
- "chose":["postgres"],"rejected":["sqlite"],"supersedes":[]}
+ "chose":["postgres"],"rejected":["sqlite"],"supersedes":[],"v":1}
 ```
 
-`op` is `record`, `project_tags`, `tag_merge`, `regret` or `principle`; the
-pre-tag `project_type` and the retired `tags_distinct` are still replayed so old
-journals keep working. `precedent.py rebuild` replays the file in order, so
-entries must stay append-only — editing or reordering lines rewrites history.
+`v` is the schema version, and every line written by this precedent carries it
+(spec A4). `Store.log` stamps it AFTER the payload is spread, so a payload key
+called `v` cannot shadow it. `replay_entry` treats a line with no `v` as v1 —
+that is what keeps every line written before versioning replayable — and
+REFUSES a line whose `v` exceeds `SCHEMA`, stopping the rebuild rather than
+guessing at keys it does not know.
+
+`op` is `record`, `project_tags`, `project_portable`, `tag_merge`, `regret` or
+`principle`; the pre-tag `project_type` and the retired `tags_distinct` are still
+replayed so old journals keep working. The list is exhaustive: `replay_entry`
+raises on an op it does not know rather than counting a silent no-op as a
+successful replay, so a new op must be added there and here together.
+`precedent.py rebuild` replays the file in order, so entries must stay
+append-only — editing or reordering lines rewrites history.
+
+`project_portable` carries `project_id` and `portable` only. It is written by
+`brief` when a project that predates portable ids acquires one, and replays as
+`MATCH ... SET` — never a `MERGE`, because `brief` must never create a project
+node and its journal line must not either.
 
 `project_path` and `portable` are how a replay on a second machine resolves onto
 the project that is already there instead of inventing another. **Both `record`
