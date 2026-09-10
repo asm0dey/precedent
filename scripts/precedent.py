@@ -1,6 +1,6 @@
 # /// script
 # requires-python = ">=3.12"
-# dependencies = ["grafeo"]
+# dependencies = ["grafeo", "filelock"]
 # ///
 """precedent: durable, cross-project memory of the decisions you have made.
 
@@ -22,7 +22,7 @@ cycle is about a millisecond.
 from __future__ import annotations
 
 import argparse
-import fcntl
+import filelock
 import json
 import os
 import pathlib
@@ -44,10 +44,24 @@ class Store:
         home.mkdir(parents=True, exist_ok=True)
         self.db_path = home / "graph.db"
         self.journal = home / "journal.jsonl"
-        self._lock = open(home / ".lock", "w")
+        self.lock_path = home / ".lock"
+        # This library, not raw POSIX file locking: the POSIX module does
+        # not exist on Windows, and it was imported at module scope, so the
+        # whole CLI failed to start there. Hand-rolling a cross-platform
+        # locking shim means owning a concurrency primitive on an OS this
+        # project does not run and cannot test.
+        # 30s timeout, not the default unbounded wait: the SessionStart hook
+        # runs `brief` on every session start, and an unbounded lock would
+        # hang every new session silently if a slow `rebuild` held it.
+        self._lock = filelock.FileLock(str(self.lock_path), timeout=30)
 
     def __enter__(self):
-        fcntl.flock(self._lock, fcntl.LOCK_EX)
+        try:
+            self._lock.acquire()
+        except filelock.Timeout:
+            raise SystemExit(
+                f"error: could not acquire lock at {self.lock_path} "
+                f"within 30s — another precedent process holds it")
         import grafeo
 
         self.db = grafeo.GrafeoDB(str(self.db_path))
@@ -58,8 +72,7 @@ class Store:
             self.db.close()
         except Exception:
             pass
-        fcntl.flock(self._lock, fcntl.LOCK_UN)
-        self._lock.close()
+        self._lock.release()
         return False
 
     def q(self, cypher: str, params: dict | None = None) -> list[dict]:
@@ -1204,6 +1217,49 @@ def _check_export(s: Store) -> None:
     _sh.rmtree(exp)
 
 
+def _check_store(s: Store) -> None:
+    """The lock must actually exclude a second process.
+
+    A lock that silently does not lock is the failure mode grafeo#405
+    documents: 120 writes across 6 processes, 60 stored, no errors raised.
+    Two Store objects in one process would not prove it — filelock returns
+    the same instance for a given path — so this forks.
+
+    main() holds s's own lock for the whole selftest command (it enters the
+    Store before dispatching to cmd_selftest), so it is released here first
+    — otherwise the holder subprocess below can never acquire s.lock_path
+    and this check hangs the CLI forever. It is reacquired before returning
+    so __exit__'s release stays balanced, on every path including failure.
+    """
+    import subprocess
+    import filelock
+
+    s._lock.release()
+    try:
+        holder = subprocess.Popen(
+            [sys.executable, "-c",
+             "import sys, time, filelock;"
+             "l = filelock.FileLock(sys.argv[1]);"
+             "l.acquire();"
+             "print('held', flush=True);"
+             "time.sleep(5)",
+             str(s.lock_path)],
+            stdout=subprocess.PIPE, text=True)
+        try:
+            assert holder.stdout.readline().strip() == "held"
+            contended = filelock.FileLock(str(s.lock_path))
+            try:
+                contended.acquire(timeout=0.5)
+                raise AssertionError("lock did not exclude a second process")
+            except filelock.Timeout:
+                pass
+        finally:
+            holder.kill()
+            holder.wait()
+    finally:
+        s._lock.acquire()
+
+
 def cmd_selftest(a, s: Store) -> None:
     """One runnable check over the paths that contain real logic.
 
@@ -1218,6 +1274,7 @@ def cmd_selftest(a, s: Store) -> None:
     _check_decisions(s)
     _check_relocate()
     _check_export(s)
+    _check_store(s)
     after = s.q("MATCH (n) RETURN count(n) AS n")[0]["n"]
     assert after == before, f"selftest changed node count {before} -> {after}"
     print(f"selftest ok ({before} nodes, unchanged)")
