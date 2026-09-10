@@ -60,8 +60,11 @@ class Store:
         # common case for nothing. Writers stay exclusive.
         # "Reader" is about decisions, not bytes: opening a grafeo db appends
         # ~10 bytes to its WAL even with no query run, so a shared lock lets
-        # several processes append to that log at once. _check_grafeo_readers
-        # is what says that is survivable.
+        # several processes append to that log at once. Measured: 6 concurrent
+        # readers, 27662 opens, nothing lost — while 6 concurrent writers lost
+        # 79% of their writes in silence (grafeo#405). Concurrent appends are
+        # benign, concurrent data writes are not. _check_grafeo_readers keeps
+        # that honest; its docstring carries the numbers.
         # 30s timeout, not the default unbounded wait, and it is on readers
         # too: the SessionStart hook runs `brief` on every session start, and
         # an unbounded lock would hang every new session silently if a slow
@@ -1410,14 +1413,26 @@ def _check_grafeo_readers() -> None:
     a writer process loops writes whose two properties must always agree, and
     readers assert they never see a row where they disagree.
 
-    Deliberately unlocked. The point is what grafeo does when the lock lets
-    several processes in, which is exactly what the read lock now permits.
+    Deliberately unlocked, and deliberately harsher than production.
+    ReadWriteLock grants N readers OR one exclusive writer, so under the lock
+    a reader and a writer are never concurrent; this runs them concurrently
+    anyway. That is conservative on purpose — do not delete the check as
+    unrealistic, it tests something strictly harder than the lock permits.
 
-    And they really do collide. A "reader" here reads no decision, but it is
-    not passive at the file level: opening a grafeo db appends ~10 bytes to
-    its write-ahead log before any query runs, and closing appends more. So
-    the shared read lock is a bet that grafeo tolerates concurrent WAL
-    appenders against a live writer, and this is where that bet is tested.
+    It has to, because a "reader" here reads no decision but is not passive at
+    the file level: opening a grafeo db appends ~10 bytes to its write-ahead
+    log before any query runs, and closing appends more. Which sounds like it
+    sinks the whole split — N processes writing at once is what the lock exists
+    to stop — so it was measured rather than argued, unlocked, 3s each:
+
+        6 concurrent writers:  attempted 6329, stored 1311, seed intact
+        6 concurrent readers:  27662 opens, seed intact, WAL grew to 290KB
+
+    The first row is grafeo#405 reproducing exactly: 79% of writes gone, none
+    raised. That is what makes the second row mean anything — the harness
+    demonstrably detects loss, and found none in 27,662 concurrent opens.
+    Concurrent WAL appends by readers are benign; concurrent data writes are
+    not, and the read lock rests entirely on that difference.
 
     Each reader reopens the db every round. That is not a detail — a reader
     that opens once and loops sees a single frozen value however long the
