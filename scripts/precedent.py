@@ -39,13 +39,9 @@ DEFAULT_HOME = pathlib.Path.home() / ".local/share/precedent"
 HOME = pathlib.Path(os.environ.get("PRECEDENT_HOME", DEFAULT_HOME))
 SCOPES = ("architecture", "business", "process", "tooling", "product")
 POINTER = "location"
-# The STANDING_ORDERS banner text is copied verbatim from hooks/session-start.sh
-# (lines 21–34), with $DG replaced by {cli} and shell-escaped backticks unescaped.
-# The exception is the word "regret" on line 30, which has backticks removed:
-# _check_standing_orders() asserts " regret" in text, and the hook's `regret` in
-# backticks does not contain that substring, so regret is left unformatted to pass
-# the test. (The test can match " check" and " record" from the code examples
-# `uv run {cli} check` and `uv run {cli} record`; regret appears nowhere else.)
+# The STANDING_ORDERS banner is this script's one copy; the session-start hook
+# and SKILL.md both fetch it via `standing-orders` rather than holding their
+# own text, so there is nothing else to keep in sync when this changes.
 STANDING_ORDERS = """Standing orders for the rest of this session:
 - Before recommending a technology, framework, provider, or process choice, run
   `uv run {cli} check --topic <topic> --chose <option>` and lead with what it returns.
@@ -55,7 +51,7 @@ STANDING_ORDERS = """Standing orders for the rest of this session:
   entry is worse than a missing one because it gets quoted back as precedent.
 - The user will not type a command. They say an ordinary sentence, and you notice:
   "let's go with X" -> `record`. "what did I use last time" -> `check`.
-  "X was a mistake" / "X bit us" / "never again" -> regret (marks every project
+  "X was a mistake" / "X bit us" / "never again" -> `regret` (marks every project
   that chose it, so the graph stops arguing for it), NOT another `record`.
   "I usually do X, but here..." -> `record --despite`. Draft it, show one line,
   run it once they confirm.
@@ -2654,8 +2650,16 @@ def _check_standing_orders() -> None:
     assert "{cli}" not in text, "the placeholder must be substituted, not printed"
     assert str(pathlib.Path(__file__).resolve()) in text, \
         "the banner must name this script's real path, so a copied install still works"
-    for verb in ("check", "record", "regret"):
-        assert f" {verb}" in text, f"the banner must tell the model about `{verb}`"
+    # A distinguishing phrase from each bullet's prose, not the code-example
+    # invocation line — `f" {verb}"` used to pass on `uv run {cli} check`/
+    # `record` alone, so it could not detect the prose bullets going missing.
+    distinguishing_phrases = {
+        "check": "lead with what it returns",
+        "record": "offer to record it",
+        "regret": "stops arguing for it",
+    }
+    for verb, phrase in distinguishing_phrases.items():
+        assert phrase in text, f"the banner must keep the bullet that covers `{verb}`"
     assert "not a veto" in text, "the banner must keep the 'precedent is information' line"
 
 
