@@ -39,6 +39,11 @@ DEFAULT_HOME = pathlib.Path.home() / ".local/share/precedent"
 HOME = pathlib.Path(os.environ.get("PRECEDENT_HOME", DEFAULT_HOME))
 SCOPES = ("architecture", "business", "process", "tooling", "product")
 POINTER = "location"
+SCHEMA = 1          # journal line format; bump only on a breaking change
+
+
+class JournalTooNew(Exception):
+    """A journal line written by a newer precedent than this one."""
 
 
 # --------------------------------------------------------------------------- store
@@ -143,7 +148,8 @@ class Store:
     def log(self, op: str, payload: dict) -> None:
         """Journal first, then mutate. A crash between the two costs a replay, not data."""
         with open(self.journal, "a") as f:
-            f.write(json.dumps({"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "op": op, **payload}) + "\n")
+            f.write(json.dumps({"ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                                "v": SCHEMA, "op": op, **payload}) + "\n")
             f.flush()
             os.fsync(f.fileno())
 
@@ -947,6 +953,8 @@ def cmd_rebuild(a, s: Store) -> None:
             continue
         try:
             replay_entry(s, e)
+        except JournalTooNew as exc:
+            raise SystemExit(f"stopping at line {lineno}: {exc}")
         except Exception as exc:
             skipped.append(f"line {lineno}: {e.get('op', '?')} — {type(exc).__name__}: {exc}")
             continue
@@ -961,6 +969,13 @@ def cmd_rebuild(a, s: Store) -> None:
 
 
 def replay_entry(s: Store, e: dict) -> None:
+    # A line with no "v" predates versioning and is v1 by definition. A line
+    # from the future cannot be interpreted by guessing which keys it has,
+    # which is exactly what the rest of this function does.
+    if e.get("v", 1) > SCHEMA:
+        raise JournalTooNew(
+            f"entry {e.get('id', e.get('op', '?'))!r} is schema v{e['v']},"
+            f" this precedent understands v{SCHEMA} — upgrade before replaying")
     if e["op"] == "record":
         if "tags" not in e and e.get("project_type") not in (None, "", "unknown",
                                                              "unclassified"):
@@ -1644,6 +1659,26 @@ def _check_lock_modes() -> None:
     assert wants_write_lock(p.parse_args(["record", "--title", "t"])) is True
 
 
+def _check_journal(s: Store) -> None:
+    """A journal written by a newer precedent must stop the replay, not
+    half-succeed. `rebuild` is the escape hatch that makes a v0.5 graph
+    engine an acceptable dependency; an escape hatch that silently
+    half-works is not one.
+
+    This exercises replay_entry directly rather than cmd_rebuild, because
+    rebuild starts by deleting every node and selftest must leave the
+    graph untouched.
+    """
+    assert SCHEMA == 1
+    try:
+        replay_entry(s, {"op": "record", "v": SCHEMA + 1, "id": "selftest-future"})
+        raise AssertionError("a future schema version must not replay")
+    except JournalTooNew as exc:
+        assert "selftest-future" in str(exc), exc
+    # An entry with no version is pre-versioning, and replays as v1.
+    assert s.q("MATCH (d:Decision {id:'selftest-future'}) RETURN d.id AS id") == []
+
+
 def cmd_selftest(a, s: Store) -> None:
     """One runnable check over the paths that contain real logic.
 
@@ -1659,6 +1694,7 @@ def cmd_selftest(a, s: Store) -> None:
     _check_relocate()
     _check_export(s)
     _check_store(s)
+    _check_journal(s)
     _check_lock_modes()
     _check_grafeo_readers()
     after = s.q("MATCH (n) RETURN count(n) AS n")[0]["n"]
