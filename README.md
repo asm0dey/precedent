@@ -1,8 +1,9 @@
 # precedent
 
-A Claude Code skill that remembers the architectural, business and tooling
-decisions you make — across every project — and surfaces them the next time a
-similar choice comes up.
+A CLI over a decision graph that remembers the architectural, business and
+tooling decisions you make — across every project — and surfaces them the
+next time a similar choice comes up. Claude Code, Codex and Cursor can all
+reach it; see Install below for how each one gets there.
 
 You decided something two years ago, in a repo you have not opened since, for a
 reason that made sense at the time. The code still shows *what* you chose. The
@@ -43,10 +44,44 @@ exactly wrong.
 ## Install
 
 Requires [`uv`](https://docs.astral.sh/uv/) and Python 3.12+. There is no install
-step — the CLI is a PEP 723 single file and `uv` fetches what it needs on first
-run, then reuses a cached environment. (A persistent virtualenv was measured and
-rejected: it saves 11 ms per call, both paths being dominated by the ~50 ms
-`grafeo` import, and costs an install step plus an environment to keep in sync.)
+step for the CLI itself — it is a PEP 723 single file and `uv` fetches what it
+needs on first run, then reuses a cached environment. (A persistent virtualenv
+was measured and rejected: it saves 11 ms per call, both paths being dominated
+by the ~50 ms `grafeo` import, and costs an install step plus an environment to
+keep in sync.) What differs by agent is how the skill, commands and hook get in
+front of it.
+
+### Claude Code plugin
+
+`adapters/claude/` is the plugin root — `SKILL.md` at its top, `commands/*.md`
+and `hooks/hooks.json` are discovered by Claude Code's own convention, nothing
+is enumerated by hand. The manifest that drives this channel is
+`adapters/claude/.claude-plugin/plugin.json`, generated from `agent-plugin.yaml`
+by `scripts/gen-plugin-json.py` (`--check` fails CI if it drifts).
+
+A marketplace that lists this plugin points at the subdirectory —
+`{"name": "precedent", "source": "./adapters/claude"}` for a marketplace hosted
+in this repo, or a `git-subdir` source with `path: "adapters/claude"` from
+elsewhere. This repo does not publish that marketplace catalog itself; that
+file belongs to whoever hosts the catalog, not to the plugin. Once a
+marketplace carries the entry above, install with `/plugin install precedent`.
+`claude plugin validate adapters/claude` is Anthropic's own checker and
+currently passes.
+
+### ACR (Codex and Cursor)
+
+[ACR](https://github.com/jbaruch/agentic-context-registry) is the only channel
+that reaches Codex and Cursor. It is driven by `agent-plugin.yaml`, which ships
+the skill, the CLI script and the session-start hook. ACR's v1 schema has no
+`commands` artifact class, so the 9 slash commands under Commands below cannot
+be expressed this way — Codex and Cursor users get the skill and the script,
+not the commands. Point ACR at this repo's `agent-plugin.yaml`; see ACR's own
+docs for the current install invocation.
+
+### Manual symlink
+
+What every channel above ends up doing to `~/.claude/`, done by hand — also the
+option if you would rather not add a marketplace or install ACR:
 
 ```bash
 git clone https://github.com/asm0dey/precedent ~/src/precedent
@@ -186,8 +221,21 @@ repo if you want history.
 The lock is not decoration. Two processes on one embedded graph silently lose
 writes — measured at 120 writes across 6 processes leaving 60 stored, with every
 writer reporting success ([GrafeoDB/grafeo#405](https://github.com/GrafeoDB/grafeo/issues/405),
-filed from this work). Every command takes the lock, so concurrent Claude
-sessions queue instead of clobbering.
+filed from this work). Every command takes the lock, so concurrent sessions —
+Claude Code, Codex, Cursor, or several of them at once — queue instead of
+clobbering.
+
+### A synced store is not a shared store
+
+The lock is a local file. Two machines writing to one store over Dropbox,
+iCloud or a network mount are not serialised by it — each sees its own lock
+file, and `grafeo` silently drops concurrent writes (GrafeoDB/grafeo#405:
+120 writes across 6 processes, 60 stored, nothing raised).
+
+Sync the journal, not the graph. `journal.jsonl` is append-only and merges
+in git; `precedent.py rebuild` reconstructs the graph from it on each
+machine. That is also why a project's identity is its git remote rather
+than its path — see `docs/adr/0002`.
 
 ## Measured
 
@@ -215,7 +263,8 @@ assertions and a fixture seeder if you want to re-run or extend them.
 ## Requirements
 
 - `uv` and Python 3.12+
-- Claude Code (skill, commands and hook)
+- Claude Code, Codex or Cursor — the graph, skill and CLI reach all three; the
+  9 slash commands are Claude Code only (see Install)
 - Linux, macOS or Windows
 
 ## License

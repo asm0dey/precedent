@@ -5,12 +5,16 @@ description: Remember and reuse the user's architectural, business, and tooling 
 
 # Decision graph
 
-The user's decisions are scattered across dozens of repos and two years of
-conversations they no longer remember. This skill keeps them in one graph, so a
-choice made in one project informs the next one.
+This is Claude Code's adapter onto `precedent`, a decision graph that also
+reaches Codex and Cursor (see the repo's top-level README for the other
+install channels). The user's decisions are scattered across dozens of repos
+and two years of conversations they no longer remember. The graph keeps them
+in one place, so a choice made in one project informs the next one, from
+whichever agent looks it up.
 
-Everything goes through one script. It handles locking, the append-only journal,
-project typing, and the inference queries, so you write no Cypher for normal work.
+Everything goes through one script, shared by every adapter. It handles
+locking, the append-only journal, project typing, and the inference queries,
+so you write no Cypher for normal work.
 
 ```bash
 uv run <skill>/scripts/precedent.py <command> [flags]
