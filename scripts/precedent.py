@@ -696,9 +696,19 @@ def worth_backfilling(s: "Store", info: dict) -> bool:
 
 
 def cmd_brief(a, s: Store) -> None:
-    # Read-only: never writes. A SessionStart hook calls this in every directory
-    # the user opens, and writing would litter the graph with empty projects.
+    # Writes to an existing Project node only, to backfill a portable id. Never
+    # creates one: a SessionStart hook calls this in every directory the user
+    # opens, and creating would litter the graph with empty projects.
     info = project_info(s, a.project)
+
+    # brief runs on every session start, so this is the cheapest place to fill
+    # in a portable id that did not exist when the project was first recorded —
+    # a repo that gains a remote later would otherwise stay split forever.
+    # This writes to an EXISTING node only; brief must still never create one.
+    if info["portable"] and s.q("MATCH (p:Project {id:$id}) RETURN p.portable AS pp",
+                                {"id": info["id"]}) == [{"pp": None}]:
+        s.q("MATCH (p:Project {id:$id}) SET p.portable=$pp",
+            {"id": info["id"], "pp": info["portable"]})
 
     here = s.q("""MATCH (d:Decision)-[:IN_PROJECT]->(:Project {id:$pid})
                   OPTIONAL MATCH (d)-[:ABOUT]->(t:Topic)
@@ -1087,6 +1097,21 @@ def contradictions_in(s: "Store") -> list[dict]:
     return out
 
 
+def liveness(row: dict) -> str:
+    """live | elsewhere | gone.
+
+    A path shaped for another platform is unknown, not dead: on Linux every
+    Windows-recorded project fails an exists() test, and feeding that into a
+    discount rule writes off the other machine's whole history.
+    """
+    known = paths_of(row) or [row["id"]]
+    if any(pathlib.Path(p).exists() for p in known):
+        return "live"
+    foreign = os.sep == "/" and any(re.match(r"^[A-Za-z]:\\", p) for p in known)
+    foreign = foreign or (os.sep == "\\" and all(p.startswith("/") for p in known))
+    return "elsewhere" if foreign else "gone"
+
+
 def cmd_maintain(a, s: Store) -> None:
     clashes = contradictions_in(s)
     print(f"== contradictions: same project, same topic, two live answers ({len(clashes)}) ==")
@@ -1119,11 +1144,18 @@ def cmd_maintain(a, s: Store) -> None:
     for r in untagged:
         print(f"  {r['name']}")
 
-    projects = s.q("MATCH (p:Project) RETURN DISTINCT p.id AS id, p.name AS name")
-    gone = [r for r in projects if not pathlib.Path(r["id"]).exists()]
-    print(f"\n== projects whose path no longer exists ({len(gone)}) ==")
-    for r in gone:
+    projects = s.q("MATCH (p:Project) RETURN p.id AS id, p.name AS name, p.paths AS paths")
+    states = {"gone": [], "elsewhere": []}
+    for r in projects:
+        st = liveness(r)
+        if st != "live":
+            states[st].append(r)
+    print(f"\n== projects whose path no longer exists ({len(states['gone'])}) ==")
+    for r in states["gone"]:
         print(f"  {r['name']}  ({r['id']})")
+    print(f"\n== projects recorded on another machine ({len(states['elsewhere'])}) ==")
+    for r in states["elsewhere"]:
+        print(f"  {r['name']}  ({r['id']})  — not gone, just not here")
 
     orphans = s.q("""MATCH (n) WHERE (n:Topic OR n:Option)
                        AND NOT EXISTS { MATCH (n)<--() }
@@ -2160,6 +2192,15 @@ def _check_maintain(s: Store) -> None:
         for name in ("selftest-caching", "redis", "memcached", "hazelcast"):
             s.q("""MATCH (n) WHERE (n:Topic OR n:Option) AND n.name = $name
                      AND NOT EXISTS { MATCH (n)<--() } DETACH DELETE n""", {"name": name})
+
+    # "The directory is not here" was never evidence a project is dead. It is
+    # equally consistent with an unmounted drive, another checkout, or a
+    # machine you are not sitting at — and dead projects get discounted.
+    assert liveness({"id": "/tmp", "paths": "/tmp"}) == "live"
+    assert liveness({"id": "C:\\dev\\x", "paths": "C:\\dev\\x"}) == "elsewhere"
+    assert liveness({"id": "/tmp", "paths": "/nope/x\n/tmp"}) == "live", \
+        "live if ANY known path exists"
+    assert liveness({"id": "/nope/x", "paths": "/nope/x"}) == "gone"
 
 
 def _check_identity(s: Store) -> None:
