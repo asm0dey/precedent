@@ -1135,6 +1135,44 @@ def liveness(row: dict) -> str:
     return "elsewhere" if foreign else "gone"
 
 
+def identity_gaps(s: "Store") -> list[dict]:
+    """Projects carrying no portable id, and the node that already holds theirs.
+
+    A project recorded before portable ids existed never acquires one once a
+    second machine has claimed its remote: `project_info` resolves onto the
+    node carrying the portable, so `backfill_portable` reads back a non-None
+    value and returns without writing. The older node keeps its decisions,
+    never gains an identity, and every later write lands on the newer one.
+    Nothing heals that and nothing else reports it — so this does.
+
+    Reports, never merges. Two decision histories are one repo's or two
+    repos', and telling them apart is a judgment; merging them silently is the
+    failure ADR 0002 exists to prevent.
+
+    Detection is exact rather than a heuristic: `portable` is read from the
+    local checkout's own git remote, and a twin is claimed only when another
+    node already carries that exact id. A project whose paths are not on this
+    machine has no remote to read here, so it is listed with no verdict — a
+    name or path resemblance is a guess, and a guess here merges the histories
+    of two unrelated projects.
+    """
+    rows = s.q("""MATCH (p:Project)
+                  RETURN p.id AS id, p.name AS name, p.paths AS paths,
+                         p.portable AS portable""")
+    claimed = {r["portable"]: r for r in rows if r["portable"]}
+    out = []
+    for r in sorted((r for r in rows if not r["portable"]),
+                    key=lambda r: (r["name"] or "", r["id"])):
+        # Only a directory that is actually here can be asked what its remote
+        # is, and only one git call per gap, so this stays cheap on a store
+        # whose projects mostly predate portable ids.
+        local = next((p for p in paths_of(r) or [r["id"]] if pathlib.Path(p).exists()), None)
+        pp = portable_id(pathlib.Path(local)) if local else None
+        out.append({"id": r["id"], "name": r["name"], "local": local,
+                    "portable": pp, "twin": claimed.get(pp)})
+    return out
+
+
 def cmd_maintain(a, s: Store) -> None:
     clashes = contradictions_in(s)
     print(f"== contradictions: same project, same topic, two live answers ({len(clashes)}) ==")
@@ -1179,6 +1217,35 @@ def cmd_maintain(a, s: Store) -> None:
     print(f"\n== projects recorded on another machine ({len(states['elsewhere'])}) ==")
     for r in states["elsewhere"]:
         print(f"  {r['name']}  ({r['id']})  — not gone, just not here")
+
+    gaps = identity_gaps(s)
+    splits = sum(1 for g in gaps if g["twin"])
+    print(f"\n== projects with no portable identity ({len(gaps)},"
+          f" {splits} split across two nodes) ==")
+    if not gaps:
+        print("  none — every project is keyed by its git remote")
+    for g in gaps:
+        if g["twin"]:
+            print(f"  {g['name']}  ({g['id']})  — the same repo as"
+                  f" {g['twin']['name']} ({g['twin']['id']}), which already holds"
+                  f" {g['portable']}")
+            print("     two nodes, two histories, one repo: every new decision lands on"
+                  " the second, and this one is stranded.")
+            print("     precedent will not merge them for you — that is a judgment."
+                  " Read both sides first:")
+            print("       precedent.py cypher --params "
+                  f"{json.dumps({'ids': [g['id'], g['twin']['id']]})!r} \\")
+            print('         "MATCH (d:Decision)-[:IN_PROJECT]->(p:Project)'
+                  ' WHERE p.id IN $ids RETURN p.id AS project, d.title AS decision"')
+        elif g["portable"]:
+            print(f"  {g['name']}  ({g['id']})  — {g['portable']} is unclaimed,"
+                  " so the next write here stamps it")
+        elif g["local"]:
+            print(f"  {g['name']}  ({g['id']})  — no git remote, so it is"
+                  " machine-local by design")
+        else:
+            print(f"  {g['name']}  ({g['id']})  — not on this machine, so its"
+                  " remote cannot be read here")
 
     orphans = s.q("""MATCH (n) WHERE (n:Topic OR n:Option)
                        AND NOT EXISTS { MATCH (n)<--() }
@@ -2385,6 +2452,64 @@ def _check_identity(s: Store) -> None:
             s.q("MATCH (p:Project {id:$id}) DETACH DELETE p", {"id": pid})
 
 
+def _check_identity_gaps(s: Store) -> None:
+    """The split a pre-portable project falls into, and what may be claimed
+    about it.
+
+    Both directions matter. Missing the split leaves a stranded history
+    nothing reports; claiming one that is not there points a user at a merge
+    that would fold two unrelated projects together in an append-only store.
+    So the twin is asserted present where the local checkout's own remote
+    proves it, and asserted ABSENT where nothing but a resemblance would
+    supply it.
+    """
+    import subprocess
+    import tempfile
+
+    pp = "github.com/asm0dey/selftest-gap"
+    holder = "/tmp/precedent-selftest-gap-holder"
+    ids = [holder]
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            split = pathlib.Path(tmp) / "split"   # a real checkout of that repo
+            bare = pathlib.Path(tmp) / "bare"     # a repo that has no origin
+            for d in (split, bare):
+                d.mkdir()
+                subprocess.run(["git", "-C", str(d), "init", "-q"],
+                               check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(split), "remote", "add", "origin",
+                            "git@github.com:asm0dey/selftest-gap.git"],
+                           check=True, capture_output=True)
+            ids += [str(split), str(bare)]
+
+            # The second machine, which claimed the remote first…
+            upsert_project(s, {"id": holder, "path": holder, "name": "gap",
+                               "portable": pp})
+            # …and this machine's older node for the same repo, recorded before
+            # portable ids existed. brief cannot heal it: project_info resolves
+            # onto the holder, so backfill_portable sees a non-None portable.
+            upsert_project(s, {"id": str(split), "path": str(split),
+                               "name": "gap", "portable": None})
+            upsert_project(s, {"id": str(bare), "path": str(bare),
+                               "name": "gap", "portable": None})
+
+            gaps = {g["id"]: g for g in identity_gaps(s)}
+            assert holder not in gaps, "a project that HAS an identity is not a gap"
+            assert str(split) in gaps and str(bare) in gaps, gaps
+            twin = gaps[str(split)]["twin"]
+            assert twin and twin["id"] == holder, \
+                f"the split must be reported against the node holding the remote: {gaps}"
+            assert gaps[str(split)]["portable"] == pp, gaps[str(split)]
+            # Same name, sibling path, same session — everything a heuristic
+            # would match on. It has no remote, so nothing may be claimed.
+            assert gaps[str(bare)]["portable"] is None, gaps[str(bare)]
+            assert gaps[str(bare)]["twin"] is None, \
+                "a repo with no remote must not be paired by resemblance"
+    finally:
+        for pid in ids:
+            s.q("MATCH (p:Project {id:$id}) DETACH DELETE p", {"id": pid})
+
+
 def _check_backfill_replay() -> None:
     """A backfilled portable id must survive a rebuild — Ruling 26.
 
@@ -2495,6 +2620,7 @@ def cmd_selftest(a, s: Store) -> None:
     _check_verdicts(s)
     _check_maintain(s)
     _check_identity(s)
+    _check_identity_gaps(s)
     _check_backfill_replay()
     after = s.q("MATCH (n) RETURN count(n) AS n")[0]["n"]
     assert after == before, f"selftest changed node count {before} -> {after}"
