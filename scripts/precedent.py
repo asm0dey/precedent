@@ -1019,25 +1019,12 @@ def cmd_export(a, s: Store) -> None:
     print("re-run this after recording, the snapshot is a copy and does not follow the store")
 
 
-def cmd_selftest(a, s: Store) -> None:
-    """One runnable check over the paths that contain real logic."""
+def _check_helpers() -> None:
     assert slug("Use Postgres, not Mongo!") == "use-postgres-not-mongo"
-
-    # Type-drift detection is the one piece of real heuristic logic here, and a
-    # miss silently partitions the graph. Both shapes of drift, and the
-    # near-misses that must NOT trip it.
-    for a_, b_ in [("tg-bot", "telegram-bot"), ("tgbot", "telegram-bot"),
-                   ("tg_bot", "telegram-bot"), ("telegrambot", "telegram-bot"),
-                   ("backend-apis", "backend-api"), ("webfrontend", "web-frontend"),
-                   ("data_pipeline", "data-pipeline"),
-                   ("kotlin-telegram-bot", "telegram-bot")]:
-        assert close_matches([b_], a_) == [b_], f"drift not caught: {a_} ~ {b_}"
-    for a_, b_ in [("api", "data-pipeline"), ("cli", "library"), ("ml", "mobile"),
-                   ("telegram-bot", "discord-bot"), ("backend-api", "web-frontend"),
-                   ("cli", "desktop"), ("game", "gradle-plugin")]:
-        assert close_matches([b_], a_) == [], f"false drift: {a_} ~ {b_}"
     assert csv(" a, b ,,c ") == ["a", "b", "c"]
-    before = s.q("MATCH (n) RETURN count(n) AS n")[0]["n"]
+
+
+def _check_detect_project() -> None:
     assert detect_project(pathlib.Path("/nonexistent"))["contents"] == ""
 
     tmp = pathlib.Path("/tmp/precedent-selftest-proj")
@@ -1054,6 +1041,66 @@ def cmd_selftest(a, s: Store) -> None:
     assert "node_modules" not in detect_project(tmp)["contents"]
     (tmp / "node_modules").rmdir()
     (tmp / "build.zig").unlink(); (tmp / "shard.yml").unlink(); (tmp / "src").rmdir()
+    tmp.rmdir()
+
+
+def _check_drift() -> None:
+    # Type-drift detection is the one piece of real heuristic logic here, and a
+    # miss silently partitions the graph. Both shapes of drift, and the
+    # near-misses that must NOT trip it.
+    for a_, b_ in [("tg-bot", "telegram-bot"), ("tgbot", "telegram-bot"),
+                   ("tg_bot", "telegram-bot"), ("telegrambot", "telegram-bot"),
+                   ("backend-apis", "backend-api"), ("webfrontend", "web-frontend"),
+                   ("data_pipeline", "data-pipeline"),
+                   ("kotlin-telegram-bot", "telegram-bot")]:
+        assert close_matches([b_], a_) == [b_], f"drift not caught: {a_} ~ {b_}"
+    for a_, b_ in [("api", "data-pipeline"), ("cli", "library"), ("ml", "mobile"),
+                   ("telegram-bot", "discord-bot"), ("backend-api", "web-frontend"),
+                   ("cli", "desktop"), ("game", "gradle-plugin")]:
+        assert close_matches([b_], a_) == [], f"false drift: {a_} ~ {b_}"
+
+
+def _check_projects(s: Store) -> None:
+    # Tags are a set, and overlap is what ranks precedent.
+    proj = "/tmp/precedent-selftest-tags-proj"
+    upsert_project(s, {"id": proj, "name": "selftest"})
+    attach_tags(s, proj, ["selftest-backend", "selftest-java"])
+    assert set(tags_of(s, proj)) == {"selftest-backend", "selftest-java"}
+    other = "/tmp/precedent-selftest-other"
+    upsert_project(s, {"id": other, "name": "other"})
+    attach_tags(s, other, ["selftest-java"])
+    kin = neighbours(s, {"id": other, "tags": ["selftest-java"]})
+    assert any(k["id"] == proj and k["n"] == 1 for k in kin), kin
+    kin2 = neighbours(s, {"id": other, "tags": ["selftest-java"]}, min_shared=2)
+    assert kin2 == [], "min_shared must exclude weakly-related projects"
+
+    # Containment is derived from the path key, so a monorepo needs no schema.
+    root, mod = "/tmp/precedent-selftest-root", "/tmp/precedent-selftest-root/mod"
+    sibling = "/tmp/precedent-selftest-root-elsewhere"   # prefix-similar but NOT inside
+    for pid, name in ((root, "root"), (mod, "mod"), (sibling, "elsewhere")):
+        upsert_project(s, {"id": pid, "name": name})
+    attach_tags(s, root, ["selftest-monorepo"])
+    attach_tags(s, mod, ["selftest-java"])
+    attach_tags(s, sibling, ["selftest-java"])
+    assert [r["id"] for r in enclosing(s, mod)] == [root], enclosing(s, mod)
+    assert [r["id"] for r in contained(s, root)] == [mod], contained(s, root)
+    assert enclosing(s, sibling) == [], "a shared name prefix is not containment"
+    assert effective_tags(s, {"id": mod, "tags": ["selftest-java"]}) \
+        == ["selftest-java", "selftest-monorepo"], "a module inherits enclosing tags"
+    kin3 = {r["id"] for r in neighbours(s, {"id": mod, "tags": ["selftest-java"]})}
+    assert sibling in kin3, "comparable work outside the tree must count as kin"
+    assert root not in kin3, "the enclosing project is structure, not precedent"
+    assert mod not in kin3, "a project is not its own kin"
+    for pid in (proj, other, root, mod, sibling):
+        s.q("MATCH (p:Project {id:$id}) DETACH DELETE p", {"id": pid})
+    for t in ("selftest-monorepo", "selftest-backend", "selftest-java"):
+        s.q("""MATCH (n:Tag {name:$n}) WHERE NOT EXISTS { MATCH (n)<--() }
+                 DETACH DELETE n""", {"n": t})
+
+
+def _check_decisions(s: Store) -> None:
+    tmp = pathlib.Path("/tmp/precedent-selftest-proj")
+    tmp.mkdir(exist_ok=True)
 
     s.q("MATCH (n) WHERE n.id STARTS WITH 'selftest' DETACH DELETE n")
     d = {"id": "selftest-1", "title": "T", "statement": "T", "rationale": "r",
@@ -1079,39 +1126,6 @@ def cmd_selftest(a, s: Store) -> None:
     write_decision(s, d2)
     assert s.q("MATCH (d:Decision {id:'selftest-1'}) RETURN d.status AS s") \
         == [{"s": "superseded"}], "supersede must flip the old decision's status"
-
-    # Tags are a set, and overlap is what ranks precedent.
-    assert set(tags_of(s, str(tmp))) == {"selftest-backend", "selftest-java"}
-    other = "/tmp/precedent-selftest-other"
-    upsert_project(s, {"id": other, "name": "other"})
-    attach_tags(s, other, ["selftest-java"])
-    kin = neighbours(s, {"id": other, "tags": ["selftest-java"]})
-    assert any(k["id"] == str(tmp) and k["n"] == 1 for k in kin), kin
-    kin2 = neighbours(s, {"id": other, "tags": ["selftest-java"]}, min_shared=2)
-    assert kin2 == [], "min_shared must exclude weakly-related projects"
-
-    # Containment is derived from the path key, so a monorepo needs no schema.
-    root, mod = "/tmp/precedent-selftest-root", "/tmp/precedent-selftest-root/mod"
-    sibling = "/tmp/precedent-selftest-root-elsewhere"   # prefix-similar but NOT inside
-    for pid, name in ((root, "root"), (mod, "mod"), (sibling, "elsewhere")):
-        upsert_project(s, {"id": pid, "name": name})
-    attach_tags(s, root, ["selftest-monorepo"])
-    attach_tags(s, mod, ["selftest-java"])
-    attach_tags(s, sibling, ["selftest-java"])
-    assert [r["id"] for r in enclosing(s, mod)] == [root], enclosing(s, mod)
-    assert [r["id"] for r in contained(s, root)] == [mod], contained(s, root)
-    assert enclosing(s, sibling) == [], "a shared name prefix is not containment"
-    assert effective_tags(s, {"id": mod, "tags": ["selftest-java"]}) \
-        == ["selftest-java", "selftest-monorepo"], "a module inherits enclosing tags"
-    kin3 = {r["id"] for r in neighbours(s, {"id": mod, "tags": ["selftest-java"]})}
-    assert sibling in kin3, "comparable work outside the tree must count as kin"
-    assert root not in kin3, "the enclosing project is structure, not precedent"
-    assert mod not in kin3, "a project is not its own kin"
-    for pid in (root, mod, sibling):
-        s.q("MATCH (p:Project {id:$id}) DETACH DELETE p", {"id": pid})
-    for t in ("selftest-monorepo",):
-        s.q("""MATCH (n:Tag {name:$n}) WHERE NOT EXISTS { MATCH (n)<--() }
-                 DETACH DELETE n""", {"n": t})
 
     # A knowing exception is recorded on the decision, so the warning can be
     # answered once rather than repeated forever.
@@ -1140,12 +1154,14 @@ def cmd_selftest(a, s: Store) -> None:
 
     s.q("MATCH (n) WHERE n.id STARTS WITH 'selftest' DETACH DELETE n")
     s.q("MATCH (p:Project {id:$id}) DETACH DELETE p", {"id": str(tmp)})
-    s.q("MATCH (p:Project {id:$id}) DETACH DELETE p", {"id": other})
     for name in ("persistence", "postgres", "mongo", "sqlite",
                  "selftest-backend", "selftest-java"):
         s.q("""MATCH (n) WHERE (n:Topic OR n:Option OR n:Tag) AND n.name = $name
                  AND NOT EXISTS { MATCH (n)<--() } DETACH DELETE n""", {"name": name})
+    tmp.rmdir()
 
+
+def _check_relocate() -> None:
     # Relocation moves the only copy of the journal, so every branch is checked.
     import shutil as _sh
     base = pathlib.Path("/tmp/precedent-selftest-home")
@@ -1176,14 +1192,32 @@ def cmd_selftest(a, s: Store) -> None:
     assert (dflt / "journal.jsonl").read_text() == "a\n"
     _sh.rmtree(base)
 
+
+def _check_export(s: Store) -> None:
     # The export layout is what the server reads; if save() or the directory
     # shape changes, the UI shows an empty graph and says nothing.
+    import shutil as _sh
     exp = pathlib.Path("/tmp/precedent-selftest-export")
     _sh.rmtree(exp, ignore_errors=True)
     export_to(s, exp)
     assert (exp / "default" / "data.grafeo").stat().st_size > 0, "export wrote nothing"
     _sh.rmtree(exp)
 
+
+def cmd_selftest(a, s: Store) -> None:
+    """One runnable check over the paths that contain real logic.
+
+    Each check cleans up after itself, so the node count is the invariant
+    that catches a check which forgot to.
+    """
+    before = s.q("MATCH (n) RETURN count(n) AS n")[0]["n"]
+    _check_helpers()
+    _check_detect_project()
+    _check_drift()
+    _check_projects(s)
+    _check_decisions(s)
+    _check_relocate()
+    _check_export(s)
     after = s.q("MATCH (n) RETURN count(n) AS n")[0]["n"]
     assert after == before, f"selftest changed node count {before} -> {after}"
     print(f"selftest ok ({before} nodes, unchanged)")
