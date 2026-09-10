@@ -154,7 +154,9 @@ git clone https://github.com/asm0dey/precedent ~/src/precedent
 ln -s ~/src/precedent/adapters/claude/skills/* ~/.claude/skills/
 ```
 
-Optionally, prime every session automatically by adding this to `~/.claude/settings.json`:
+The hook lives beside the skills rather than inside one, so it is wired by path rather
+than through a symlink. Optionally, prime every session automatically by adding this to
+`~/.claude/settings.json`:
 
 ```json
 {
@@ -164,7 +166,7 @@ Optionally, prime every session automatically by adding this to `~/.claude/setti
         "matcher": "*",
         "hooks": [
           { "type": "command",
-            "command": "\"$HOME/.claude/skills/precedent/hooks/session-start.sh\"",
+            "command": "\"$HOME/src/precedent/adapters/claude/hooks/session-start.sh\"",
             "shell": "bash",
             "timeout": 20 }
         ]
@@ -188,11 +190,11 @@ without Git Bash gets no priming hook, and no error either.
 Windows users without Git Bash can opt in to the PowerShell hook by pasting a second entry
 into their own `~/.claude/settings.json`, pointing at `session-start.ps1`
 (`adapters/claude/hooks/session-start.ps1` in the repo, or
-`$HOME/.claude/skills/precedent/hooks/session-start.ps1` if symlinked per this section):
+`$HOME/src/precedent/adapters/claude/hooks/session-start.ps1` for the clone above):
 
 ```json
 { "type": "command",
-  "command": "& \"$HOME/.claude/skills/precedent/hooks/session-start.ps1\"",
+  "command": "& \"$HOME/src/precedent/adapters/claude/hooks/session-start.ps1\"",
   "shell": "powershell",
   "timeout": 20 }
 ```
