@@ -38,13 +38,32 @@ from datetime import date
 DEFAULT_HOME = pathlib.Path.home() / ".local/share/precedent"
 HOME = pathlib.Path(os.environ.get("PRECEDENT_HOME", DEFAULT_HOME))
 SCOPES = ("architecture", "business", "process", "tooling", "product")
+POINTER = "location"
 
 
 # --------------------------------------------------------------------------- store
 
+def resolve_home(home: pathlib.Path) -> pathlib.Path:
+    """Follow a relocation pointer, once.
+
+    The default path is wired into the SessionStart hook and every slash
+    command, and PRECEDENT_HOME is unset in the hook's environment, so an
+    env var cannot move the store. A symlink can, but needs Developer Mode
+    on Windows. A file holding a path needs neither.
+
+    Exactly one hop: a pointer found inside the target is a stale file, not
+    an instruction, and following it is how a relocation loop starts.
+    """
+    pointer = home / POINTER
+    if not pointer.is_file():
+        return home
+    return pathlib.Path(pointer.read_text().strip()).expanduser()
+
+
 class Store:
     def __init__(self, home: pathlib.Path = HOME, write: bool = True):
-        self.home = home
+        home.mkdir(parents=True, exist_ok=True)
+        self.home = home = resolve_home(home)
         home.mkdir(parents=True, exist_ok=True)
         self.db_path = home / "graph.db"
         self.journal = home / "journal.jsonl"
@@ -960,60 +979,40 @@ def replay_entry(s: Store, e: dict) -> None:
 
 
 def relocate(target: pathlib.Path, default: pathlib.Path = DEFAULT_HOME) -> str:
-    """Keep the store somewhere else, and symlink the default path at it.
-
-    The default path is wired into a dozen places that never see a flag — the
-    SessionStart hook, every slash command, every `uv run precedent.py` typed by
-    hand. A symlink moves the bytes without touching any of them, which an
-    env var cannot do: `PRECEDENT_HOME` is unset in the hook's environment and
-    in every shell the user did not export it from.
-    """
+    """Keep the store somewhere else, and leave a pointer at the default path."""
     import shutil
 
     target.mkdir(parents=True, exist_ok=True)
     if target == default:
         return f"store: {target}  (the default location)"
 
-    if default.is_symlink():
-        # A symlink carries no data, so repointing loses nothing — the old
-        # store stays where it is, intact, in case it was the wrong move.
-        old = os.readlink(default)
-        default.unlink()
-        default.symlink_to(target, target_is_directory=True)
-        return f"store: {target}\n  {default} now points here (was {old}, left untouched)"
-
-    if default.exists():
-        if not default.is_dir():
-            raise SystemExit(f"{default} exists and is not a directory; move it aside first")
-        # `.lock` is recreated on every run and never carries state.
-        payload = [f for f in default.iterdir() if f.name != ".lock"]
-        occupied = [f for f in target.iterdir() if f.name != ".lock"]
-        if payload and occupied:
-            raise SystemExit(
-                f"both {default} and {target} hold a store; refusing to merge.\n"
-                f"  merging is a journal concatenation, so do it deliberately:\n"
-                f"    cat {default}/journal.jsonl >> {target}/journal.jsonl\n"
-                f"    mv {default} {default}.bak\n"
-                f"  then re-run this, and `precedent.py rebuild`.")
-        for f in payload:
-            shutil.move(str(f), str(target / f.name))
-        shutil.rmtree(default)
-        moved = f"  moved {len(payload)} file(s) from the default location\n" if payload else ""
-    else:
-        moved = ""
-
-    default.parent.mkdir(parents=True, exist_ok=True)
-    default.symlink_to(target, target_is_directory=True)
-    return f"store: {target}\n{moved}  {default} -> {target}"
+    default.mkdir(parents=True, exist_ok=True)
+    payload = [f for f in default.iterdir()
+               if f.name not in (".lock", POINTER)]
+    occupied = [f for f in target.iterdir()
+                if f.name not in (".lock", POINTER)]
+    if payload and occupied:
+        raise SystemExit(
+            f"both {default} and {target} hold a store; refusing to merge.\n"
+            f"  merging is a journal concatenation, so do it deliberately:\n"
+            f"    cat {default}/journal.jsonl >> {target}/journal.jsonl\n"
+            f"    mv {default} {default}.bak\n"
+            f"  then re-run this, and `precedent.py rebuild`.")
+    for f in payload:
+        shutil.move(str(f), str(target / f.name))
+    (default / POINTER).write_text(str(target) + "\n")
+    moved = f"  moved {len(payload)} file(s) from the default location\n" if payload else ""
+    return f"store: {target}\n{moved}  {default}/{POINTER} points here"
 
 
 def cmd_init(a) -> None:
     """Runs without a Store: opening one would create the default directory
-    that this command may be about to replace with a symlink."""
+    before this command has decided where the store belongs."""
     if not a.location:
         d = DEFAULT_HOME
-        if d.is_symlink():
-            print(f"store: {d.resolve()}  (via symlink at {d})")
+        real = resolve_home(d)
+        if real != d:
+            print(f"store: {real}  (via {d}/{POINTER})")
         elif d.exists():
             print(f"store: {d}  (the default location)")
         else:
@@ -1205,19 +1204,11 @@ def _check_relocate() -> None:
     _sh.rmtree(base, ignore_errors=True)
     dflt, tgt = base / "default", base / "elsewhere"
     relocate(tgt, dflt)
-    assert dflt.is_symlink() and dflt.resolve() == tgt.resolve(), "fresh default must be linked"
 
     _sh.rmtree(base); dflt.mkdir(parents=True)
     (dflt / "journal.jsonl").write_text("x\n"); (dflt / ".lock").write_text("")
     relocate(tgt, dflt)
     assert (tgt / "journal.jsonl").read_text() == "x\n", "an existing store must move, not vanish"
-    assert dflt.is_symlink(), "and the default path must end up pointing at it"
-
-    (dflt / "journal.jsonl").write_text("y\n")     # writes through the link
-    second = base / "second"; second.mkdir()
-    relocate(second, dflt)
-    assert dflt.resolve() == second.resolve() and (tgt / "journal.jsonl").exists(), \
-        "repointing a symlink must leave the old store intact"
 
     _sh.rmtree(base); dflt.mkdir(parents=True); tgt.mkdir(parents=True)
     (dflt / "journal.jsonl").write_text("a\n"); (tgt / "journal.jsonl").write_text("b\n")
@@ -1278,6 +1269,23 @@ def _check_store(s: Store) -> None:
     # Documentation of the configured value; the contention below is what
     # proves the mechanism.
     assert s._lock.timeout == 30, "Store lock must have a bounded timeout"
+
+    # A pointer file, not a symlink: os.symlink raises WinError 1314 without
+    # Developer Mode, which made `init` unavailable on Windows for its whole
+    # purpose. Resolution follows the pointer exactly once — a pointer inside
+    # the target is data, not a second hop.
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        default, target = pathlib.Path(tmp) / "default", pathlib.Path(tmp) / "target"
+        default.mkdir()
+        (default / "journal.jsonl").write_text('{"op":"noop"}\n')
+        relocate(target, default=default)
+        assert not (default / "journal.jsonl").exists(), "payload must move"
+        assert (target / "journal.jsonl").exists(), "payload must arrive"
+        assert (default / POINTER).read_text().strip() == str(target)
+        assert resolve_home(default) == target, "pointer must resolve"
+        (target / POINTER).write_text(str(default))
+        assert resolve_home(default) == target, "resolution must not loop"
 
     import subprocess
     import tempfile
@@ -1681,7 +1689,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     it = sub.add_parser("init", help="show where the store lives, or move it elsewhere")
     it.add_argument("location", nargs="?",
-                    help="directory to keep the store in; the default path is symlinked at it")
+                    help="directory to keep the store in; a pointer file is left at the default path")
     it.set_defaults(writes=True, fn=cmd_init)
 
     cy = sub.add_parser("cypher", help="escape hatch")
