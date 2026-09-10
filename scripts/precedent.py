@@ -479,6 +479,19 @@ def cmd_principle(a, s: Store) -> None:
 
 # ------------------------------------------------------------------------ reading
 
+def worth_backfilling(s: "Store", info: dict) -> bool:
+    """Is this a real project whose decisions are simply not in the graph yet?
+
+    Two gates, both cheap and both necessary. A version-controlled directory is
+    the difference between a project and a download folder. A non-empty graph is
+    the difference between a user who forgot this repo and a user who has never
+    used the tool and is being sold it on their first session.
+    """
+    if not (pathlib.Path(info["id"]) / ".git").exists():
+        return False
+    return s.q("MATCH (d:Decision) RETURN count(d) AS n")[0]["n"] > 0
+
+
 def cmd_brief(a, s: Store) -> None:
     # Read-only: never writes. A SessionStart hook calls this in every directory
     # the user opens, and writing would litter the graph with empty projects.
@@ -506,6 +519,15 @@ def cmd_brief(a, s: Store) -> None:
     # every directory: staying silent is decided here, on the data, rather than
     # by the caller grepping this output for phrases that later change.
     if a.only_if_relevant and not here and not kin and not inherited and not below:
+        # Silence here would be self-defeating: a project with history and
+        # nothing recorded is precisely the one worth backfilling, and it is
+        # the only case where nobody is ever prompted to do it.
+        if worth_backfilling(s, info):
+            print(f"project: {info['name']}   nothing recorded here yet.")
+            print(f"  contents: {info['contents']}")
+            print("  it has history the graph cannot see. Offer /precedent-analyze"
+                  " — read the manifests, CI and docs, and record the decisions"
+                  " already visible in them. Offer once; do not push it.")
         return
 
     tags = effective_tags(s, info)
@@ -1020,6 +1042,13 @@ def cmd_selftest(a, s: Store) -> None:
                   RETURN o.name AS n""") == [{"n": "postgres"}]
     assert s.q("""MATCH (:Decision {id:'selftest-1'})-[:REJECTED]->(o:Option)
                   RETURN o.name AS n""") == [{"n": "mongo"}]
+
+    # The backfill nudge fires in a repo the graph has never seen, and nowhere
+    # else — a bare directory is not a project worth prompting about.
+    assert not worth_backfilling(s, {"id": str(tmp)}), "a non-repo must not be nudged"
+    (tmp / ".git").mkdir(exist_ok=True)
+    assert worth_backfilling(s, {"id": str(tmp)}), "a repo with a populated graph must be"
+    (tmp / ".git").rmdir()
 
     d2 = {**d, "id": "selftest-2", "chose": ["sqlite"], "supersedes": ["selftest-1"]}
     write_decision(s, d2)

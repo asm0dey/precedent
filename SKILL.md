@@ -1,6 +1,6 @@
 ---
 name: precedent
-description: Remember and reuse the user's architectural, business, and tooling decisions across every project, in a queryable graph. Use this skill whenever the user settles a non-trivial choice (database, framework, auth, deployment, pricing, process) so it gets recorded; whenever they start work in a project you have not briefed on yet; whenever they weigh options and ask "which should I use" or "what did I do last time"; and whenever they ask what they have already decided, whether a choice is consistent with their other projects, or what decisions they still owe this project. Trigger it even when the user does not mention decisions, memory, or the graph — the point is that they should not have to remember to ask.
+description: Remember and reuse the user's architectural, business, and tooling decisions across every project, in a queryable graph. Use this skill whenever the user settles a non-trivial choice (database, framework, auth, deployment, pricing, process) so it gets recorded; whenever they start work in a project you have not briefed on yet, including one that predates the graph and whose decisions are only visible in its manifests, CI and docs; whenever they weigh options and ask "which should I use" or "what did I do last time"; and whenever they ask what they have already decided, whether a choice is consistent with their other projects, or what decisions they still owe this project. Trigger it even when the user does not mention decisions, memory, or the graph — the point is that they should not have to remember to ask.
 ---
 
 # Decision graph
@@ -61,6 +61,9 @@ session, not as a script you run now and forget:
   settled. Not at the end of the session, which never arrives.
 - **When you notice yourself saying "I'd suggest X"** — that is the trigger. Check
   first, then suggest.
+- **When a project you are working in has nothing recorded** — offer to backfill
+  it once (`/precedent-analyze`), then drop it. An empty project is why precedent
+  is thin everywhere else; nagging about it is why the user turns the skill off.
 
 The failure mode this guards against is not refusing to use the graph; it is
 using it once, at the start, and then spending the rest of the session
@@ -71,7 +74,7 @@ is already in your context and you can skip the `brief` step — but the check-
 before-you-recommend and record-when-settled orders still apply, because no hook
 can know when a decision happens mid-conversation.
 
-## The four moments this skill exists for
+## The moments this skill exists for
 
 ### 1. Starting work in a project
 
@@ -86,6 +89,20 @@ uv run <skill>/scripts/precedent.py brief --project .
 Lead with what's relevant, not the whole dump. If the brief shows precedent that
 contradicts what the user is about to do, say so now rather than after they've
 written the code.
+
+### 1a. The project has history, but the graph does not
+
+A repo older than this skill has its decisions in the manifests, the CI config
+and the README, and none of them are queryable. The brief says as much: in a git
+repo with no recorded decisions it prints *nothing recorded here yet* instead of
+staying silent.
+
+Offer `/precedent-analyze` — once, in one sentence, with the two or three
+decisions you can already see named so the offer is concrete. If the user says
+no, or ignores it, it does not come up again this session. The backfill itself
+is the command's job, and its one hard rule is worth repeating here: a rationale
+you inferred is quoted back to the user in two years as their own reasoning, so
+it comes from evidence (cited) or from them, never from you.
 
 ### 2. The user is choosing something
 
