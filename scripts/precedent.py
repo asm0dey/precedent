@@ -861,8 +861,6 @@ def cmd_tag(a, s: Store) -> None:
 
 def apply_tag_merge(s: Store, frm: str, to: str) -> None:
     s.q("MERGE (t:Tag {name:$n})", {"n": to})
-    s.q("""MATCH (p:Project)-[r:TAGGED]->(:Tag {name:$f})
-           DELETE r""", {"f": frm}) if False else None
     for r in s.q("""MATCH (p:Project)-[:TAGGED]->(:Tag {name:$f})
                     RETURN p.id AS id""", {"f": frm}):
         s.q("""MATCH (p:Project {id:$id}),(t:Tag {name:$to})
@@ -871,17 +869,39 @@ def apply_tag_merge(s: Store, frm: str, to: str) -> None:
     s.q("""MATCH (t:Tag {name:$f}) DETACH DELETE t""", {"f": frm})
 
 
+def contradictions_in(s: "Store") -> list[dict]:
+    """Two live decisions in one project answering one topic differently.
+
+    Grouped by decision id, not by project+topic: `record --chose redis,memcached`
+    is one decision picking a stack, and reporting it as a clash asks the user
+    to supersede a decision that is correct.
+    """
+    rows = s.q("""MATCH (d:Decision)-[:ABOUT]->(t:Topic),
+                        (d)-[:CHOSE]->(o:Option),
+                        (d)-[:IN_PROJECT]->(p:Project)
+                  WHERE d.status='active'
+                  RETURN p.name AS pname, t.name AS topic, d.id AS did,
+                         collect(DISTINCT o.name) AS opts""")
+    grouped: dict[tuple[str, str], dict[str, list[str]]] = {}
+    for r in rows:
+        grouped.setdefault((r["pname"], r["topic"]), {})[r["did"]] = sorted(r["opts"])
+    out = []
+    for (pname, topic), decisions in sorted(grouped.items()):
+        if len(decisions) < 2:
+            continue
+        if len({tuple(v) for v in decisions.values()}) < 2:
+            continue        # two decisions, same answer: duplicated, not conflicting
+        out.append({"project": pname, "topic": topic, "decisions": decisions})
+    return out
+
+
 def cmd_maintain(a, s: Store) -> None:
-    contradictions = s.q("""MATCH (d:Decision)-[:ABOUT]->(t:Topic),
-                                  (d)-[:CHOSE]->(o:Option),
-                                  (d)-[:IN_PROJECT]->(p:Project)
-                            WHERE d.status='active'
-                            RETURN p.name AS pname, t.name AS topic,
-                                   collect(DISTINCT o.name) AS opts""")
-    clashes = [r for r in contradictions if len(r["opts"]) > 1]
+    clashes = contradictions_in(s)
     print(f"== contradictions: same project, same topic, two live answers ({len(clashes)}) ==")
     for r in clashes:
-        print(f"  {r['pname']}/{r['topic']}: {','.join(r['opts'])} — supersede one")
+        print(f"  {r['project']}/{r['topic']} — supersede one:")
+        for did, opts in sorted(r["decisions"].items()):
+            print(f"     {','.join(opts)}  #{did}")
 
     tags = [r["tag"] for r in vocabulary(s)]
     groups: dict[str, list[str]] = {}
@@ -1768,6 +1788,30 @@ def _check_verdicts(s: Store) -> None:
                      AND NOT EXISTS { MATCH (n)<--() } DETACH DELETE n""", {"name": name})
 
 
+def _check_maintain(s: Store) -> None:
+    """One decision choosing redis AND memcached is a stack, not a clash.
+    Two decisions in one project choosing differently is the real thing.
+    """
+    base = {"title": "T", "statement": "T", "rationale": "r",
+            "scope": "architecture", "created": today(),
+            "project_id": "/tmp/precedent-selftest-m", "project_name": "m",
+            "tags": [], "topics": ["selftest-caching"],
+            "rejected": [], "supersedes": []}
+    try:
+        write_decision(s, {**base, "id": "selftest-m1", "chose": ["redis", "memcached"]})
+        assert contradictions_in(s) == [], "a multi-option decision is not a clash"
+        write_decision(s, {**base, "id": "selftest-m2", "chose": ["hazelcast"]})
+        clash = contradictions_in(s)
+        assert len(clash) == 1 and clash[0]["topic"] == "selftest-caching", clash
+        assert set(clash[0]["decisions"]) == {"selftest-m1", "selftest-m2"}, clash
+    finally:
+        s.q("MATCH (n) WHERE n.id STARTS WITH 'selftest-m' DETACH DELETE n")
+        s.q("MATCH (p:Project {id:'/tmp/precedent-selftest-m'}) DETACH DELETE p")
+        for name in ("selftest-caching", "redis", "memcached", "hazelcast"):
+            s.q("""MATCH (n) WHERE (n:Topic OR n:Option) AND n.name = $name
+                     AND NOT EXISTS { MATCH (n)<--() } DETACH DELETE n""", {"name": name})
+
+
 def cmd_selftest(a, s: Store) -> None:
     """One runnable check over the paths that contain real logic.
 
@@ -1787,6 +1831,7 @@ def cmd_selftest(a, s: Store) -> None:
     _check_lock_modes()
     _check_grafeo_readers()
     _check_verdicts(s)
+    _check_maintain(s)
     after = s.q("MATCH (n) RETURN count(n) AS n")[0]["n"]
     assert after == before, f"selftest changed node count {before} -> {after}"
     print(f"selftest ok ({before} nodes, unchanged)")
