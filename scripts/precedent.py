@@ -325,84 +325,17 @@ def classify_prompt(s: "Store", info: dict) -> str:
     return "\n".join(lines)
 
 
-def close_matches(known: list[str], name: str) -> list[str]:
-    """Existing tags that probably mean the same thing as `name`.
+def normalised(tag: str) -> str:
+    """Case, separators and a trailing plural are spelling, not meaning.
 
-    Two shapes of drift occur and neither is caught naively. Spelling variants
-    ("data_pipeline" / "data-pipeline") need edit distance. Abbreviations
-    ("tgbot" / "telegram-bot") share no word and score far below any sane
-    threshold, but the short form is the long form with letters removed — so
-    test for subsequence, anchored on a shared first letter and a length ratio
-    that stops "api" matching "data-pipeline".
-
-    Shared-token matching was tried and removed: "telegram-bot" and
-    "discord-bot" share "bot" and mean entirely different things.
+    This is the whole of the automated drift check. It reports identity
+    after trivial normalisation, which is a fact; whether two genuinely
+    different words mean the same thing is a judgment, and it belongs to
+    the caller, which has the vocabulary, the repository and the
+    conversation in front of it.
     """
-    import difflib
-
-    def flat(x: str) -> str:
-        return re.sub(r"[-_ ]+", "", x)
-
-    def subsequence(short: str, long: str) -> bool:
-        it = iter(long)
-        return all(c in it for c in short)
-
-    out = []
-    for k in known:
-        a, b = flat(k), flat(name)
-        short, long = (a, b) if len(a) <= len(b) else (b, a)
-        abbreviation = (short[:1] == long[:1] and len(short) >= 3
-                        and len(short) / len(long) >= 0.35
-                        and subsequence(short, long))
-        if abbreviation or difflib.SequenceMatcher(None, k, name).ratio() >= 0.6:
-            out.append(k)
-    return sorted(out)
-
-
-def asserted_distinct(s: "Store") -> set[tuple[str, str]]:
-    """Tag pairs a human already declared to mean different things."""
-    out: set[tuple[str, str]] = set()
-    if not s.journal.exists():
-        return out
-    for line in open(s.journal):
-        if '"tags_distinct"' not in line:
-            continue
-        e = json.loads(line)
-        if e.get("op") == "tags_distinct":
-            out.add(tuple(sorted((e["a"], e["b"]))))
-    return out
-
-
-def refuse_drift(s: "Store", names: list[str], allow_new: bool) -> None:
-    """Stop near-duplicate tags being minted.
-
-    Precedent is computed on exact tag strings, so `tgbot` beside `telegram-bot`
-    does not merely look untidy — it hides half the history from the other half,
-    silently, with no error at the moment it happens. Different agents in
-    different sessions reach for different words for the same thing, so this is
-    the normal case rather than an edge case. Refusing costs one command.
-    """
-    known = [r["tag"] for r in vocabulary(s)]
-    for name in names:
-        if name in known:
-            continue
-        near = close_matches(known, name)
-        if allow_new:
-            for other in near:
-                s.log("tags_distinct", {"a": name, "b": other})
-            continue
-        if not near:
-            continue
-        print(f"refusing to create the tag '{name}': it looks like"
-              f" {', '.join(repr(n) for n in near)}, already in use.")
-        print("  precedent matches tags exactly, so a near-duplicate hides half"
-              " the history from the other half.")
-        if known:
-            print("  tags in use: " + ", ".join(known))
-        print(f"  reuse one:   precedent.py tag --project . --add {near[0]}")
-        print(f"  or if it really means something different:")
-        print(f"               precedent.py tag --project . --add {name} --new-tag")
-        raise SystemExit(2)
+    flat = re.sub(r"[-_ ]+", "", tag.lower())
+    return flat[:-1] if len(flat) > 3 and flat.endswith("s") else flat
 
 
 def upsert_project(s: Store, info: dict) -> dict:
@@ -825,13 +758,14 @@ def cmd_tag(a, s: Store) -> None:
     Tags are free-form: no fixed list can anticipate every kind of thing someone
     builds. But precedent is ranked by exact tag overlap, so a near-duplicate
     hides history rather than merely looking untidy — hence the vocabulary is
-    printed before anything is coined, and `refuse_drift` blocks the obvious
-    collisions.
+    printed on every write, not only on request, so the caller can see a
+    near-duplicate and merge it. Whether two words mean the same thing is a
+    judgment call for the caller, not this function. See docs/adr/0001.
     """
     if a.merge:
-        # Drift happens anyway — through --new-tag, through tags minted before
-        # this guard existed, through two agents tagging at the same moment.
-        # Repair has to be one command, or the graph stays split.
+        # Drift happens anyway — different agents in different sessions reach
+        # for different words for the same thing. Repair has to be one
+        # command, or the graph stays split.
         if not a.into:
             print("--merge needs --into <existing tag>"); raise SystemExit(2)
         moved = s.q("""MATCH (p:Project)-[:TAGGED]->(:Tag {name:$f})
@@ -859,7 +793,6 @@ def cmd_tag(a, s: Store) -> None:
         print("add some with: precedent.py tag --project . --add backend,java,distributed")
         return
 
-    refuse_drift(s, add, a.new_tag)     # before any write, exits non-zero
     upsert_project(s, info)
     if add:
         s.log("project_tags", {"project_id": info["id"], "name": info["name"],
@@ -871,6 +804,16 @@ def cmd_tag(a, s: Store) -> None:
         s.q("""MATCH (:Project {id:$id})-[r:TAGGED]->(:Tag {name:$n}) DELETE r""",
             {"id": info["id"], "n": t})
     print(f"{info['name']} tags: {', '.join(tags_of(s, info['id'])) or 'none'}")
+    known = vocabulary(s)
+    if known:
+        # Printed on every write, not only on request: precedent is ranked by
+        # exact tag overlap, so a near-duplicate hides half the history from
+        # the other half. The caller can see it here and merge.
+        print("\ntags in use across all projects:")
+        for r in known:
+            print(f"  {r['tag']:<20} {r['projects']} project(s)")
+        print("  a near-duplicate above splits your history —"
+              " merge with: precedent.py tag --merge <from> --into <to>")
 
 
 def apply_tag_merge(s: Store, frm: str, to: str) -> None:
@@ -898,13 +841,21 @@ def cmd_maintain(a, s: Store) -> None:
         print(f"  {r['pname']}/{r['topic']}: {','.join(r['opts'])} — supersede one")
 
     tags = [r["tag"] for r in vocabulary(s)]
-    pairs = {tuple(sorted((t, n))) for t in tags for n in close_matches(tags, t) if n != t}
-    pairs -= asserted_distinct(s)
-    print(f"\n== tags that may mean the same thing ({len(pairs)}) ==")
-    if not pairs:
+    groups: dict[str, list[str]] = {}
+    for t in tags:
+        groups.setdefault(normalised(t), []).append(t)
+    dupes = [sorted(v) for v in groups.values() if len(v) > 1]
+    print(f"\n== tags that differ only in spelling ({len(dupes)}) ==")
+    if not dupes:
         print("  none")
-    for a_, b_ in sorted(pairs):
-        print(f"  '{a_}' / '{b_}' — merge with: precedent.py tag --merge {b_} --into {a_}")
+    for names in sorted(dupes):
+        print(f"  {' / '.join(repr(n) for n in names)}"
+              f" — merge with: precedent.py tag --merge {names[1]} --into {names[0]}")
+    print(f"\n== the whole tag vocabulary ({len(tags)}) ==")
+    for r in vocabulary(s):
+        print(f"  {r['tag']:<20} {r['projects']} project(s)")
+    print("  two of these that mean the same thing split your history."
+          " Spelling variants are listed above; the rest is a judgment call.")
 
     untagged = s.q("""MATCH (p:Project)
                       WHERE NOT EXISTS { MATCH (p)-[:TAGGED]->(:Tag) }
@@ -989,7 +940,8 @@ def replay_entry(s: Store, e: dict) -> None:
             e["tags"] = [e["project_type"]]
         write_decision(s, e)
     elif e["op"] == "tags_distinct":
-        pass  # advisory bookkeeping, read straight from the journal
+        pass  # legacy: written by the removed drift guard, kept so old
+              # journals still replay. Never emitted now. See docs/adr/0001.
     elif e["op"] == "tag_merge":
         apply_tag_merge(s, e["from"], e["to"])
     elif e["op"] in ("project_tags", "project_type"):
@@ -1166,19 +1118,19 @@ def _check_detect_project() -> None:
 
 
 def _check_drift() -> None:
-    # Type-drift detection is the one piece of real heuristic logic here, and a
-    # miss silently partitions the graph. Both shapes of drift, and the
-    # near-misses that must NOT trip it.
-    for a_, b_ in [("tg-bot", "telegram-bot"), ("tgbot", "telegram-bot"),
-                   ("tg_bot", "telegram-bot"), ("telegrambot", "telegram-bot"),
-                   ("backend-apis", "backend-api"), ("webfrontend", "web-frontend"),
-                   ("data_pipeline", "data-pipeline"),
-                   ("kotlin-telegram-bot", "telegram-bot")]:
-        assert close_matches([b_], a_) == [b_], f"drift not caught: {a_} ~ {b_}"
-    for a_, b_ in [("api", "data-pipeline"), ("cli", "library"), ("ml", "mobile"),
-                   ("telegram-bot", "discord-bot"), ("backend-api", "web-frontend"),
-                   ("cli", "desktop"), ("game", "gradle-plugin")]:
-        assert close_matches([b_], a_) == [], f"false drift: {a_} ~ {b_}"
+    """Identity after trivial normalisation is a fact. Similarity is a
+    judgment, and it moved to the model — difflib scored a shared prefix
+    and called web-frontend and web-backend the same thing, 7 of 11
+    realistic pairs wrong. See docs/adr/0001.
+    """
+    for a_, b_ in [("data_pipeline", "data-pipeline"), ("Data-Pipeline", "data-pipeline"),
+                   ("backend-apis", "backend-api"), ("telegram bot", "telegram-bot")]:
+        assert normalised(a_) == normalised(b_), f"spelling variant missed: {a_} ~ {b_}"
+    for a_, b_ in [("web-frontend", "web-backend"), ("mobile-ios", "mobile-android"),
+                   ("telegram-bot", "telegram-api"), ("python", "python3"),
+                   ("backend", "backend-api"), ("ml-training", "ml-serving"),
+                   ("cli", "clip")]:
+        assert normalised(a_) != normalised(b_), f"false match: {a_} ~ {b_}"
 
 
 def _check_projects(s: Store) -> None:
@@ -1780,8 +1732,6 @@ def build_parser() -> argparse.ArgumentParser:
     tg.add_argument("--project", default=".")
     tg.add_argument("--add", default="", help="comma-separated tags to add")
     tg.add_argument("--remove", default="", help="comma-separated tags to remove")
-    tg.add_argument("--new-tag", action="store_true",
-                    help="confirm a tag resembling an existing one really means something else")
     tg.add_argument("--merge", default="", help="retag every project carrying this tag")
     tg.add_argument("--into", default="", help="the tag --merge should fold into")
     tg.set_defaults(writes=True, fn=cmd_tag)
