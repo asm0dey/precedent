@@ -39,6 +39,20 @@ DEFAULT_HOME = pathlib.Path.home() / ".local/share/precedent"
 HOME = pathlib.Path(os.environ.get("PRECEDENT_HOME", DEFAULT_HOME))
 SCOPES = ("architecture", "business", "process", "tooling", "product")
 POINTER = "location"
+STANDING_ORDERS = """Standing orders for the rest of this session:
+- Before recommending a technology, framework, provider, or process choice, run
+  `uv run {cli} check --topic <topic> --chose <option>` and lead with what it returns.
+  Your opinion is worth less than what the user already chose and lived with.
+- When a choice gets settled in conversation, offer to record it, then run
+  `uv run {cli} record ...` with --rationale and --rejected. Ask first; a wrong
+  entry is worse than a missing one because it gets quoted back as precedent.
+- The user will not type a command. They say an ordinary sentence, and you notice:
+  "let's go with X" -> record. "what did I use last time" -> check.
+  "X was a mistake" / "X bit us" / "never again" -> regret (marks every project
+  that chose it, so the graph stops arguing for it), NOT another record.
+  "I usually do X, but here..." -> record --despite. Draft it, show one line,
+  run it once they confirm.
+- Precedent is information, not a veto. Say when consistency is wrong here."""
 SCHEMA = 1          # journal line format; bump only on a breaking change
 
 
@@ -1457,6 +1471,20 @@ def cmd_init(a) -> None:
     print(relocate(pathlib.Path(a.location).expanduser().resolve()))
 
 
+def cmd_standing_orders(a) -> None:
+    """Print the banner every adapter appends after a brief.
+
+    Runs without a Store: opening one would create the store directory as a
+    side effect of printing text, and this command is called from hooks that
+    may run in directories the user never records anything in.
+
+    The path is resolved from __file__ rather than assumed, so a checkout
+    installed anywhere — ~/.claude/skills, an ACR cache, a bare clone —
+    prints a command line that actually runs.
+    """
+    print(STANDING_ORDERS.format(cli=pathlib.Path(__file__).resolve()))
+
+
 def cmd_cypher(a, s: Store) -> None:
     for row in s.q(a.query, json.loads(a.params) if a.params else None):
         print(row)
@@ -1629,59 +1657,60 @@ def _check_decisions(s: Store) -> None:
              "tags": ["selftest-backend", "selftest-java"],
              "topics": ["persistence"], "chose": ["postgres"],
              "rejected": ["mongo"], "supersedes": []}
-        write_decision(s, d)
-        assert s.q("""MATCH (:Decision {id:'selftest-1'})-[:CHOSE]->(o:Option)
-                      RETURN o.name AS n""") == [{"n": "postgres"}]
-        assert s.q("""MATCH (:Decision {id:'selftest-1'})-[:REJECTED]->(o:Option)
-                      RETURN o.name AS n""") == [{"n": "mongo"}]
+        try:
+            write_decision(s, d)
+            assert s.q("""MATCH (:Decision {id:'selftest-1'})-[:CHOSE]->(o:Option)
+                          RETURN o.name AS n""") == [{"n": "postgres"}]
+            assert s.q("""MATCH (:Decision {id:'selftest-1'})-[:REJECTED]->(o:Option)
+                          RETURN o.name AS n""") == [{"n": "mongo"}]
 
-        # The backfill nudge fires in a repo the graph has never seen, and nowhere
-        # else — a bare directory is not a project worth prompting about.
-        # Shaped like a real info dict, id and all: worth_backfilling reads only
-        # `path`, but a fixture missing `id` is a template for a KeyError the next
-        # time one of these is passed to a containment helper.
-        proj_info = {"id": str(tmp), "path": str(tmp)}
-        assert not worth_backfilling(s, proj_info), "a non-repo must not be nudged"
-        (tmp / ".git").mkdir(exist_ok=True)
-        assert worth_backfilling(s, proj_info), "a repo with a populated graph must be"
-        (tmp / ".git").rmdir()
+            # The backfill nudge fires in a repo the graph has never seen, and nowhere
+            # else — a bare directory is not a project worth prompting about.
+            # Shaped like a real info dict, id and all: worth_backfilling reads only
+            # `path`, but a fixture missing `id` is a template for a KeyError the next
+            # time one of these is passed to a containment helper.
+            proj_info = {"id": str(tmp), "path": str(tmp)}
+            assert not worth_backfilling(s, proj_info), "a non-repo must not be nudged"
+            (tmp / ".git").mkdir(exist_ok=True)
+            assert worth_backfilling(s, proj_info), "a repo with a populated graph must be"
+            (tmp / ".git").rmdir()
 
-        d2 = {**d, "id": "selftest-2", "chose": ["sqlite"], "supersedes": ["selftest-1"]}
-        write_decision(s, d2)
-        assert s.q("MATCH (d:Decision {id:'selftest-1'}) RETURN d.status AS s") \
-            == [{"s": "superseded"}], "supersede must flip the old decision's status"
+            d2 = {**d, "id": "selftest-2", "chose": ["sqlite"], "supersedes": ["selftest-1"]}
+            write_decision(s, d2)
+            assert s.q("MATCH (d:Decision {id:'selftest-1'}) RETURN d.status AS s") \
+                == [{"s": "superseded"}], "supersede must flip the old decision's status"
 
-        # A knowing exception is recorded on the decision, so the warning can be
-        # answered once rather than repeated forever.
-        d3 = {**d, "id": "selftest-3", "chose": ["sqlite"], "supersedes": [],
-              "despite": "selftest reason", "diverges_from": ["selftest-1"]}
-        write_decision(s, d3)
-        assert s.q("MATCH (d:Decision {id:'selftest-3'}) RETURN d.despite AS w") \
-            == [{"w": "selftest reason"}]
-        assert s.q("""MATCH (:Decision {id:'selftest-3'})-[:DIVERGES_FROM]->(o:Decision)
-                      RETURN o.id AS id""") == [{"id": "selftest-1"}]
+            # A knowing exception is recorded on the decision, so the warning can be
+            # answered once rather than repeated forever.
+            d3 = {**d, "id": "selftest-3", "chose": ["sqlite"], "supersedes": [],
+                  "despite": "selftest reason", "diverges_from": ["selftest-1"]}
+            write_decision(s, d3)
+            assert s.q("MATCH (d:Decision {id:'selftest-3'}) RETURN d.despite AS w") \
+                == [{"w": "selftest reason"}]
+            assert s.q("""MATCH (:Decision {id:'selftest-3'})-[:DIVERGES_FROM]->(o:Decision)
+                          RETURN o.id AS id""") == [{"id": "selftest-1"}]
 
-        # A regret must invert precedent, not erase it: the decision survives with
-        # its rationale, but stops counting as a norm.
-        apply_regret(s, {"id": "selftest-lesson", "topic": "persistence",
-                         "option": "postgres", "because": "selftest lesson",
-                         "instead": "sqlite", "decisions": ["selftest-2"],
-                         "created": today()})
-        assert s.q("MATCH (d:Decision {id:'selftest-2'}) RETURN d.status AS s") \
-            == [{"s": "regretted"}], "regret must mark the decision, not delete it"
-        assert s.q("""MATCH (:Lesson {id:'selftest-lesson'})-[:REGRETS]->(d:Decision)
-                      RETURN d.id AS id""") == [{"id": "selftest-2"}]
-        assert s.q("""MATCH (d:Decision {id:'selftest-2'})-[:CHOSE]->(o:Option)
-                      RETURN o.name AS n""") == [{"n": "sqlite"}], \
-            "the original choice and its rationale must survive a regret"
-        s.q("MATCH (l:Lesson {id:'selftest-lesson'}) DETACH DELETE l")
-
-        s.q("MATCH (n) WHERE n.id STARTS WITH 'selftest' DETACH DELETE n")
-        s.q("MATCH (p:Project {id:$id}) DETACH DELETE p", {"id": str(tmp)})
-        for name in ("persistence", "postgres", "mongo", "sqlite",
-                     "selftest-backend", "selftest-java"):
-            s.q("""MATCH (n) WHERE (n:Topic OR n:Option OR n:Tag) AND n.name = $name
-                     AND NOT EXISTS { MATCH (n)<--() } DETACH DELETE n""", {"name": name})
+            # A regret must invert precedent, not erase it: the decision survives with
+            # its rationale, but stops counting as a norm.
+            apply_regret(s, {"id": "selftest-lesson", "topic": "persistence",
+                             "option": "postgres", "because": "selftest lesson",
+                             "instead": "sqlite", "decisions": ["selftest-2"],
+                             "created": today()})
+            assert s.q("MATCH (d:Decision {id:'selftest-2'}) RETURN d.status AS s") \
+                == [{"s": "regretted"}], "regret must mark the decision, not delete it"
+            assert s.q("""MATCH (:Lesson {id:'selftest-lesson'})-[:REGRETS]->(d:Decision)
+                          RETURN d.id AS id""") == [{"id": "selftest-2"}]
+            assert s.q("""MATCH (d:Decision {id:'selftest-2'})-[:CHOSE]->(o:Option)
+                          RETURN o.name AS n""") == [{"n": "sqlite"}], \
+                "the original choice and its rationale must survive a regret"
+        finally:
+            s.q("MATCH (l:Lesson {id:'selftest-lesson'}) DETACH DELETE l")
+            s.q("MATCH (n) WHERE n.id STARTS WITH 'selftest' DETACH DELETE n")
+            s.q("MATCH (p:Project {id:$id}) DETACH DELETE p", {"id": str(tmp)})
+            for name in ("persistence", "postgres", "mongo", "sqlite",
+                         "selftest-backend", "selftest-java"):
+                s.q("""MATCH (n) WHERE (n:Topic OR n:Option OR n:Tag) AND n.name = $name
+                         AND NOT EXISTS { MATCH (n)<--() } DETACH DELETE n""", {"name": name})
 
 
 def _check_relocate() -> None:
@@ -2056,6 +2085,7 @@ def _check_lock_modes() -> None:
         # read-only in the sense that matters: they settle no decision
         "check": False, "suggest": False, "export": False,
         "maintain": False,      # until --apply; see wants_write_lock
+        "standing-orders": False,  # returns before any Store is opened
         # writers
         "record": True, "tag": True, "regret": True, "principle": True,
         "rebuild": True, "selftest": True,
@@ -2599,6 +2629,29 @@ def _check_backfill_replay() -> None:
                 "replaying a project_portable line must not create a node"
 
 
+def _check_standing_orders() -> None:
+    """One source for the banner, and it must name a runnable CLI path.
+
+    The banner lived in two places — the session-start hook and SKILL.md —
+    and this plan adds two more adapters. Four copies drift, and a drifted
+    standing order is a model told to run a command that no longer exists.
+    """
+    import io
+    import contextlib
+
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        cmd_standing_orders(None)
+    text = out.getvalue()
+
+    assert "{cli}" not in text, "the placeholder must be substituted, not printed"
+    assert str(pathlib.Path(__file__).resolve()) in text, \
+        "the banner must name this script's real path, so a copied install still works"
+    for verb in ("check", "record", "regret"):
+        assert f" {verb}" in text, f"the banner must tell the model about `{verb}`"
+    assert "not a veto" in text, "the banner must keep the 'precedent is information' line"
+
+
 def cmd_selftest(a, s: Store) -> None:
     """One runnable check over the paths that contain real logic.
 
@@ -2606,6 +2659,7 @@ def cmd_selftest(a, s: Store) -> None:
     that catches a check which forgot to.
     """
     before = s.q("MATCH (n) RETURN count(n) AS n")[0]["n"]
+    _check_standing_orders()
     _check_helpers()
     _check_detect_project()
     _check_drift()
@@ -2719,6 +2773,10 @@ def build_parser() -> argparse.ArgumentParser:
                     help="directory to keep the store in; a pointer file is left at the default path")
     it.set_defaults(writes=True, fn=cmd_init)
 
+    so = sub.add_parser("standing-orders",
+                        help="print the standing orders every adapter appends after a brief")
+    so.set_defaults(writes=False, fn=cmd_standing_orders)
+
     cy = sub.add_parser("cypher", help="escape hatch")
     cy.add_argument("query")
     cy.add_argument("--params", default="")
@@ -2750,8 +2808,8 @@ def wants_write_lock(a) -> bool:
 
 def main(argv=None) -> int:
     a = build_parser().parse_args(argv)
-    if a.cmd == "init":
-        cmd_init(a)
+    if a.cmd in ("init", "standing-orders"):
+        a.fn(a)
         return 0
     with Store(pathlib.Path(a.home), write=wants_write_lock(a)) as s:
         a.fn(a, s)
