@@ -689,9 +689,21 @@ def cmd_check(a, s: Store) -> None:
         print(f"     \"{r['why']}\"")
         if r["instead"]:
             print(f"     you now prefer: {r['instead']}")
+    # The mirror of REGRET. Without it, taking a lesson's own advice is met
+    # with the rejections recorded by the decisions that lesson regrets.
+    endorsed = s.q("""MATCH (l:Lesson {topic:$t, instead:$o})
+                      OPTIONAL MATCH (l)-[:REGRETS]->(d:Decision)
+                      RETURN l.option AS was, l.statement AS why, count(d) AS n""",
+                   {"t": topic, "o": a.chose})
+    endorsed = [r for r in endorsed if r["why"]]
+    for r in endorsed:
+        print(f"  LESSON: you chose '{r['was']}' for this in {r['n']} project(s),"
+              f" concluded it was a mistake, and now prefer this —")
+        print(f"     \"{r['why']}\"")
     revived = s.q("""MATCH (d:Decision)-[:ABOUT]->(:Topic {name:$t}),
                            (d)-[:REJECTED]->(:Option {name:$o}),
                            (d)-[:IN_PROJECT]->(p:Project)
+                     WHERE d.status='active'
                      RETURN p.name AS pname, d.title AS title, d.rationale AS why""",
                   {"t": topic, "o": a.chose})
     for r in revived:
@@ -724,7 +736,7 @@ def cmd_check(a, s: Store) -> None:
     for r in violated:
         print(f"  PRINCIPLE in play: {r['stmt']}  #{r['id']}")
 
-    if not revived and not diverged and not regrets:
+    if not revived and not diverged and not regrets and not endorsed:
         print("  clear — no rejection history, no regret, no divergence from your norm")
 
 
@@ -1689,6 +1701,52 @@ def _check_verdicts(s: Store) -> None:
         s.q("MATCH (n) WHERE n.id STARTS WITH 'selftest-v' DETACH DELETE n")
         s.q("""MATCH (p:Project {id:'/tmp/precedent-selftest-v'}) DETACH DELETE p""")
         for name in ("selftest-persistence", "postgres", "sqlite", "selftest-v-tag"):
+            s.q("""MATCH (n) WHERE (n:Topic OR n:Option OR n:Tag) AND n.name = $name
+                     AND NOT EXISTS { MATCH (n)<--() } DETACH DELETE n""", {"name": name})
+
+    import argparse as _argparse
+    import contextlib
+    import io
+
+    base = {"title": "T", "statement": "T", "rationale": "flexible schema",
+            "scope": "architecture", "created": today(),
+            "tags": ["selftest-v-tag"], "topics": ["selftest-persistence"],
+            "chose": ["mongo"], "rejected": ["postgres"], "supersedes": []}
+    write_decision(s, {**base, "id": "selftest-v2",
+                       "project_id": "/tmp/precedent-selftest-v2", "project_name": "vA"})
+    write_decision(s, {**base, "id": "selftest-v3",
+                       "project_id": "/tmp/precedent-selftest-v3", "project_name": "vB"})
+    apply_regret(s, {"id": "selftest-v-lesson", "topic": "selftest-persistence",
+                     "option": "mongo", "because": "schema drift",
+                     "instead": "postgres",
+                     "decisions": ["selftest-v2", "selftest-v3"], "created": today()})
+    # A second lesson on a different topic. Ruling 5's bug bound the WHERE to
+    # the OPTIONAL MATCH's leg, not the Lesson, so every lesson with a
+    # statement came back regardless of topic — this must stay silent below.
+    apply_regret(s, {"id": "selftest-v-lesson-other", "topic": "selftest-v-other-topic",
+                     "option": "sqlite", "because": "unrelated mistake",
+                     "instead": "mysql", "decisions": [], "created": today()})
+    try:
+        out = io.StringIO()
+        args = _argparse.Namespace(topic="selftest-persistence",
+                                   chose="postgres", project="/tmp")
+        with contextlib.redirect_stdout(out):
+            cmd_check(args, s)
+        text = out.getvalue()
+        assert "CONFLICT" not in text, f"a regretted rejection must not fire CONFLICT:\n{text}"
+        assert "LESSON" in text, f"the lesson that recommends this must fire:\n{text}"
+        assert "schema drift" in text, text
+        assert "clear —" not in text, text
+        assert "unrelated mistake" not in text, \
+            f"a lesson on a different topic must not fire here:\n{text}"
+    finally:
+        s.q("MATCH (l:Lesson {id:'selftest-v-lesson'}) DETACH DELETE l")
+        s.q("MATCH (l:Lesson {id:'selftest-v-lesson-other'}) DETACH DELETE l")
+        s.q("MATCH (n) WHERE n.id STARTS WITH 'selftest-v' DETACH DELETE n")
+        for pid in ("/tmp/precedent-selftest-v2", "/tmp/precedent-selftest-v3"):
+            s.q("MATCH (p:Project {id:$id}) DETACH DELETE p", {"id": pid})
+        for name in ("selftest-persistence", "selftest-v-other-topic",
+                      "mongo", "postgres", "sqlite", "mysql", "selftest-v-tag"):
             s.q("""MATCH (n) WHERE (n:Topic OR n:Option OR n:Tag) AND n.name = $name
                      AND NOT EXISTS { MATCH (n)<--() } DETACH DELETE n""", {"name": name})
 
