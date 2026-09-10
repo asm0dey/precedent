@@ -1218,24 +1218,34 @@ def _check_export(s: Store) -> None:
 
 
 def _check_store(s: Store) -> None:
-    """The lock must actually exclude a second process.
+    """The lock must actually exclude a second process, and Store must
+    wire it to the file it claims.
 
     A lock that silently does not lock is the failure mode grafeo#405
     documents: 120 writes across 6 processes, 60 stored, no errors raised.
-    Two Store objects in one process would not prove it — filelock returns
-    the same instance for a given path — so this forks.
+    Two FileLock objects for one path in one process would not prove
+    exclusion — filelock returns the same instance for a given path — so
+    exclusion is proved with a forked holder process instead.
 
-    main() holds s's own lock for the whole selftest command (it enters the
-    Store before dispatching to cmd_selftest), so it is released here first
-    — otherwise the holder subprocess below can never acquire s.lock_path
-    and this check hangs the CLI forever. It is reacquired before returning
-    so __exit__'s release stays balanced, on every path including failure.
+    The exclusion half runs against a throwaway path in a temp directory,
+    not s.lock_path: s's own lock is held for the whole selftest command
+    (main() enters the Store before dispatching to cmd_selftest), and
+    contending on the real path here would mean releasing the lock guarding
+    the open graph db for the duration of the check — exactly the hazard
+    the lock exists to prevent. A throwaway path proves the same filelock
+    mechanics without mutating the store under test. Wiring — that Store
+    actually built its lock against lock_path, with the intended timeout —
+    is checked directly against s._lock's own attributes instead.
     """
+    assert s._lock.lock_file == str(s.lock_path), "Store did not lock its own path"
+    assert s._lock.timeout == 30, "Store lock must have a bounded timeout"
+
     import subprocess
+    import tempfile
     import filelock
 
-    s._lock.release()
-    try:
+    with tempfile.TemporaryDirectory() as tmp:
+        lock_path = pathlib.Path(tmp) / ".lock"
         holder = subprocess.Popen(
             [sys.executable, "-c",
              "import sys, time, filelock;"
@@ -1243,11 +1253,12 @@ def _check_store(s: Store) -> None:
              "l.acquire();"
              "print('held', flush=True);"
              "time.sleep(5)",
-             str(s.lock_path)],
+             str(lock_path)],
             stdout=subprocess.PIPE, text=True)
         try:
+            assert holder.stdout is not None
             assert holder.stdout.readline().strip() == "held"
-            contended = filelock.FileLock(str(s.lock_path))
+            contended = filelock.FileLock(str(lock_path))
             try:
                 contended.acquire(timeout=0.5)
                 raise AssertionError("lock did not exclude a second process")
@@ -1256,8 +1267,6 @@ def _check_store(s: Store) -> None:
         finally:
             holder.kill()
             holder.wait()
-    finally:
-        s._lock.acquire()
 
 
 def cmd_selftest(a, s: Store) -> None:

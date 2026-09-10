@@ -205,7 +205,7 @@ assertions and a fixture seeder if you want to re-run or extend them.
 
 - `uv` and Python 3.12+
 - Claude Code (skill, commands and hook)
-- Linux or macOS (the lock uses `fcntl.flock`)
+- Linux, macOS or Windows
 
 ## License
 
