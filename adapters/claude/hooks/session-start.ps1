@@ -5,9 +5,15 @@
 # hooks.json cannot gate a hook entry by platform (there is no such field in
 # Claude Code's hook schema), so this entry is invoked on every OS via the
 # cross-platform `pwsh` binary — including POSIX boxes that happen to have
-# pwsh installed. $IsWindows is a PowerShell 6+ automatic variable; bail out
-# immediately, before touching anything, everywhere except real Windows.
-if (-not $IsWindows) { exit 0 }
+# pwsh installed. $IsWindows is a PowerShell 6+ automatic variable; it does
+# not exist under Windows PowerShell 5.1 (Claude Code's own fallback when
+# pwsh 7 is missing), where an undefined variable reads as $null. `-not $null`
+# is $true, so `if (-not $IsWindows)` would exit on 5.1 too, disabling the
+# hook on the default Windows configuration. `$IsWindows -eq $false` avoids
+# that: `$null -eq $false` is $false, so 5.1 falls through and primes, while
+# PS 6+ on POSIX (where $IsWindows is actually $false) still exits. Do not
+# "simplify" this back to `-not $IsWindows`.
+if ($IsWindows -eq $false) { exit 0 }
 
 $ErrorActionPreference = 'SilentlyContinue'
 

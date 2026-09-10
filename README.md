@@ -115,10 +115,6 @@ Optionally, prime every session automatically — add to `~/.claude/settings.jso
           { "type": "command",
             "command": "\"$HOME/.claude/skills/precedent/hooks/session-start.sh\"",
             "shell": "bash",
-            "timeout": 20 },
-          { "type": "command",
-            "command": "& \"$HOME/.claude/skills/precedent/hooks/session-start.ps1\"",
-            "shell": "powershell",
             "timeout": 20 }
         ]
       }
@@ -127,14 +123,37 @@ Optionally, prime every session automatically — add to `~/.claude/settings.jso
 }
 ```
 
-Claude Code's hook schema has no per-platform field, so both entries are
-attempted on every OS: `shell` only picks which interpreter runs a given
-entry's `command`, it does not gate by OS. The `.sh` entry runs under bash
-wherever bash exists (Linux, macOS, Windows with Git Bash). The `.ps1` entry
-runs under `pwsh` wherever `pwsh` exists — including non-Windows boxes that
-happen to have it installed — so `session-start.ps1` guards itself with
-PowerShell's `$IsWindows` and exits immediately everywhere else. `hooks.json`
-alongside both scripts carries this same shape.
+`hooks.json` (`adapters/claude/hooks/hooks.json`, the copy of this block the
+plugin channel ships) carries the same single bash entry, for the same
+reason: Claude Code's hook schema has no per-platform field, so `shell` only
+picks which interpreter runs a given entry's `command` — it does not gate by
+OS. A second entry pointing at `session-start.ps1` would therefore be
+dispatched on every OS too, not just Windows. On macOS or Linux with `pwsh`
+installed it would run and rely on the script's own `$IsWindows` guard to
+exit quietly; on macOS or Linux *without* `pwsh` installed, there is no
+interpreter to run it at all, and the entry throws — a user-visible hook
+error every session, which defeats the entire point of a silent-by-design
+hook. Shipping only the bash entry is silent by construction on POSIX, and
+on Windows with Git Bash it still works; a Windows user without Git Bash
+simply gets no priming hook rather than an error.
+
+Windows users without Git Bash can opt in to the PowerShell hook by pasting
+a second entry into their own `~/.claude/settings.json`, pointing at
+`session-start.ps1` (`adapters/claude/hooks/session-start.ps1` in the repo —
+`$HOME/.claude/skills/precedent/hooks/session-start.ps1` if symlinked per
+this section):
+
+```json
+{ "type": "command",
+  "command": "& \"$HOME/.claude/skills/precedent/hooks/session-start.ps1\"",
+  "shell": "powershell",
+  "timeout": 20 }
+```
+
+Add it as a second element of the `"hooks"` array above. The script still
+guards itself — `if ($IsWindows -eq $false) { exit 0 }` — so it only does
+anything on real Windows, including the PowerShell 5.1 fallback Claude Code
+uses when `pwsh` 7 is not installed.
 
 The hook runs a brief for the working directory and injects it, so a session
 opens already knowing what you decided here and in comparable projects. It stays
