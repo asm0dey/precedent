@@ -5,11 +5,13 @@
         "matcher": "*",
         "hooks": [
           { "type": "command",
-            "command": "$CLAUDE_PLUGIN_ROOT/hooks/session-start.sh",
-            "platforms": ["linux", "darwin"] },
+            "command": "\"$CLAUDE_PLUGIN_ROOT/hooks/session-start.sh\"",
+            "shell": "bash",
+            "timeout": 20 },
           { "type": "command",
-            "command": "powershell -NoProfile -ExecutionPolicy Bypass -File $CLAUDE_PLUGIN_ROOT/hooks/session-start.ps1",
-            "platforms": ["win32"] }
+            "command": "& \"$env:CLAUDE_PLUGIN_ROOT/hooks/session-start.ps1\"",
+            "shell": "powershell",
+            "timeout": 20 }
         ]
       }
     ]

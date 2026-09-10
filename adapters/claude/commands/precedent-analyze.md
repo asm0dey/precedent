@@ -12,7 +12,7 @@ Work in this order. Do not skip to recording.
 **1. See what is already known.**
 
 ```bash
-uv run ~/.claude/skills/precedent/scripts/precedent.py brief --project ${1:-.}
+uv run ~/.claude/skills/precedent/../../scripts/precedent.py brief --project ${1:-.}
 ```
 
 Everything under "decided here" is already recorded; re-recording it creates a
@@ -63,7 +63,7 @@ option, and where the rationale came from. Let the user strike the ones that are
 noise. Then record them one at a time:
 
 ```bash
-uv run ~/.claude/skills/precedent/scripts/precedent.py record --project ${1:-.} \
+uv run ~/.claude/skills/precedent/../../scripts/precedent.py record --project ${1:-.} \
   --title "..." --rationale "inferred from ..." --scope tooling \
   --topic "..." --chose "..." --rejected "..."
 ```

@@ -14,7 +14,7 @@ confirm. A wrong entry is worse than a missing one, because it gets quoted back
 later as their own precedent.
 
 ```bash
-uv run ~/.claude/skills/precedent/scripts/precedent.py record --project . \
+uv run ~/.claude/skills/precedent/../../scripts/precedent.py record --project . \
   --title "..." --rationale "..." --scope architecture \
   --topic "..." --chose "..." --rejected "..."
 ```

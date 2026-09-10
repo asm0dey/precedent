@@ -6,7 +6,7 @@ argument-hint: "[path, defaults to cwd]"
 Run:
 
 ```bash
-uv run ~/.claude/skills/precedent/scripts/precedent.py brief --project ${1:-.}
+uv run ~/.claude/skills/precedent/../../scripts/precedent.py brief --project ${1:-.}
 ```
 
 Report what it returns, leading with whatever bears on the work at hand rather

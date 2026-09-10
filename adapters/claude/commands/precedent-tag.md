@@ -6,13 +6,13 @@ argument-hint: "[comma-separated tags to add]"
 With no arguments, show the vocabulary and this project's current tags:
 
 ```bash
-uv run ~/.claude/skills/precedent/scripts/precedent.py tag --project .
+uv run ~/.claude/skills/precedent/../../scripts/precedent.py tag --project .
 ```
 
 With arguments, add them:
 
 ```bash
-uv run ~/.claude/skills/precedent/scripts/precedent.py tag --project . --add "$ARGUMENTS"
+uv run ~/.claude/skills/precedent/../../scripts/precedent.py tag --project . --add "$ARGUMENTS"
 ```
 
 Always look at the vocabulary before coining anything. Matching is exact, so a

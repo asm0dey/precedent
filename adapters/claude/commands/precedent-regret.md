@@ -4,7 +4,7 @@ argument-hint: "<topic> <option that was wrong>"
 ---
 
 ```bash
-uv run ~/.claude/skills/precedent/scripts/precedent.py regret \
+uv run ~/.claude/skills/precedent/../../scripts/precedent.py regret \
   --topic "$1" --chose "$2" --because "..." --instead "..."
 ```
 

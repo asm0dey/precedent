@@ -1,6 +1,14 @@
 # SessionStart hook: prime the session with the user's recorded decisions.
 # Silent unless the graph has something relevant — an empty brief is noise.
 # Twin of session-start.sh; both must stay behaviourally identical.
+#
+# hooks.json cannot gate a hook entry by platform (there is no such field in
+# Claude Code's hook schema), so this entry is invoked on every OS via the
+# cross-platform `pwsh` binary — including POSIX boxes that happen to have
+# pwsh installed. $IsWindows is a PowerShell 6+ automatic variable; bail out
+# immediately, before touching anything, everywhere except real Windows.
+if (-not $IsWindows) { exit 0 }
+
 $ErrorActionPreference = 'SilentlyContinue'
 
 # Resolve the CLI relative to this script, not an assumed install path.

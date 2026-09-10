@@ -36,7 +36,7 @@ $ precedent.py check --topic persistence --chose sqlite
   DIVERGENCE: you chose 'postgres' for this in 3 other projects
 ```
 
-Neither is a veto. Every rationale carries a condition, and the skill's job is to
+Neither is a veto. Every rationale carries a condition, and the agent's job is to
 ask whether it still holds: *that* rationale is about concurrent writers, so it
 says nothing about a single-user tool. Consistency is usually right and sometimes
 exactly wrong.
@@ -59,14 +59,19 @@ is enumerated by hand. The manifest that drives this channel is
 `adapters/claude/.claude-plugin/plugin.json`, generated from `agent-plugin.yaml`
 by `scripts/gen-plugin-json.py` (`--check` fails CI if it drifts).
 
-A marketplace that lists this plugin points at the subdirectory —
-`{"name": "precedent", "source": "./adapters/claude"}` for a marketplace hosted
-in this repo, or a `git-subdir` source with `path: "adapters/claude"` from
-elsewhere. This repo does not publish that marketplace catalog itself; that
-file belongs to whoever hosts the catalog, not to the plugin. Once a
-marketplace carries the entry above, install with `/plugin install precedent`.
+No marketplace catalog for this plugin is published anywhere yet — this repo
+ships no `marketplace.json`, so `/plugin install precedent` is not something a
+reader can run today. A marketplace entry that lists this plugin would point at
+the subdirectory — `{"name": "precedent", "source": "./adapters/claude"}` for a
+marketplace hosted in this repo, or a `git-subdir` source with
+`path: "adapters/claude"` from elsewhere — but a `git-subdir` source sparse-
+checks out only that named subdirectory, so it would ship the adapter
+*without* `scripts/precedent.py`, the CLI the adapter drives. A plugin install
+of this project needs the full repository checkout, not a subdirectory-only
+one; that file, and which install shape avoids the gap above, is a decision
+for whoever hosts the catalog, not something this repo settles for them.
 `claude plugin validate adapters/claude` is Anthropic's own checker and
-currently passes.
+currently passes, with one warning (the optional `author` field is absent).
 
 ### ACR (Codex and Cursor)
 
@@ -77,6 +82,15 @@ the skill, the CLI script and the session-start hook. ACR's v1 schema has no
 be expressed this way — Codex and Cursor users get the skill and the script,
 not the commands. Point ACR at this repo's `agent-plugin.yaml`; see ACR's own
 docs for the current install invocation.
+
+ACR's `hookArtifact` takes exactly one path per hook entry, and this manifest
+declares only `adapters/claude/hooks/session-start.sh` — a POSIX shell script.
+A second entry pointing at `session-start.ps1` was considered and rejected:
+ACR has no platform gate either, so both would fire on every OS, which is the
+exact double-hook failure mode fixed elsewhere in this README's Claude Code
+hooks section. Windows Codex/Cursor users installed via ACR get the skill and
+the script but no session-priming hook until ACR itself grows a platform
+condition.
 
 ### Manual symlink
 
@@ -99,11 +113,13 @@ Optionally, prime every session automatically — add to `~/.claude/settings.jso
         "matcher": "*",
         "hooks": [
           { "type": "command",
-            "command": "$HOME/.claude/skills/precedent/hooks/session-start.sh",
-            "platforms": ["linux", "darwin"] },
+            "command": "\"$HOME/.claude/skills/precedent/hooks/session-start.sh\"",
+            "shell": "bash",
+            "timeout": 20 },
           { "type": "command",
-            "command": "powershell -NoProfile -ExecutionPolicy Bypass -File $HOME/.claude/skills/precedent/hooks/session-start.ps1",
-            "platforms": ["win32"] }
+            "command": "& \"$HOME/.claude/skills/precedent/hooks/session-start.ps1\"",
+            "shell": "powershell",
+            "timeout": 20 }
         ]
       }
     ]
@@ -111,7 +127,14 @@ Optionally, prime every session automatically — add to `~/.claude/settings.jso
 }
 ```
 
-On Windows, `session-start.ps1` runs in place of the `.sh` script; `hooks.json` alongside both scripts pins which one runs per platform.
+Claude Code's hook schema has no per-platform field, so both entries are
+attempted on every OS: `shell` only picks which interpreter runs a given
+entry's `command`, it does not gate by OS. The `.sh` entry runs under bash
+wherever bash exists (Linux, macOS, Windows with Git Bash). The `.ps1` entry
+runs under `pwsh` wherever `pwsh` exists — including non-Windows boxes that
+happen to have it installed — so `session-start.ps1` guards itself with
+PowerShell's `$IsWindows` and exits immediately everywhere else. `hooks.json`
+alongside both scripts carries this same shape.
 
 The hook runs a brief for the working directory and injects it, so a session
 opens already knowing what you decided here and in comparable projects. It stays
@@ -203,8 +226,8 @@ separately and they never lend each other precedent, while decisions recorded at
 
 Keep it elsewhere — a synced folder, an encrypted volume, a private git
 checkout — with `init`. It moves an existing store to the new directory and
-symlinks the default path at it, so the hook and the slash commands keep working
-with no configuration:
+leaves a pointer file at the default path naming it, so the hook and the slash
+commands keep working with no configuration:
 
 ```bash
 uv run ~/src/precedent/scripts/precedent.py init ~/Sync/precedent
