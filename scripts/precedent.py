@@ -2291,7 +2291,7 @@ def _check_identity(s: Store) -> None:
         s.q("MATCH (p:Project {id:$id}) DETACH DELETE p", {"id": windows})
 
 
-def _check_backfill_replay(s: Store) -> None:
+def _check_backfill_replay() -> None:
     """A backfilled portable id must survive a rebuild — Ruling 26.
 
     graph.db is the index; journal.jsonl is the source of truth, and
@@ -2300,52 +2300,84 @@ def _check_backfill_replay(s: Store) -> None:
     `rebuild` — silently, since nothing about `brief` or `rebuild` fails.
 
     This exercises replay_entry directly rather than cmd_rebuild, the way
-    _check_journal does, because rebuild deletes every node first and
-    selftest must leave the graph untouched.
+    _check_journal does, because rebuild deletes every node first.
+
+    Takes no Store: backfill_portable calls Store.log, so running it against
+    the selftest's own store appends a real line to a real append-only
+    journal on every run — permanently, and to the user's own journal when
+    `selftest` runs without --home. The node-count invariant cannot see it,
+    because the node is deleted and only the journal grows; a later `rebuild`
+    then counts those lines as legitimate history. Same rule and same remedy
+    as _check_verdicts' cmd_principle block: a throwaway Store in a
+    throwaway directory, which TemporaryDirectory removes on the way out.
     """
+    import tempfile
+
     pid = "/tmp/precedent-selftest-bp"
     portable = "github.com/asm0dey/selftest-bp"
-    try:
-        # An existing, portable-less node — the exact shape backfill_portable
-        # requires before it will write anything.
-        upsert_project(s, {"id": pid, "path": pid, "name": "bp", "portable": None})
-        before = sum(1 for _ in open(s.journal)) if s.journal.exists() else 0
+    # A throwaway store starts with no journal at all, so every read of it
+    # here tolerates that: a bare open() would raise FileNotFoundError and
+    # hide the assertion that is the point of the check.
+    def journal_lines(st: Store) -> list[str]:
+        return (st.journal.read_text(encoding="utf-8").splitlines()
+                if st.journal.exists() else [])
 
-        backfill_portable(s, {"id": pid, "portable": portable})
-        assert s.q("MATCH (p:Project {id:$id}) RETURN p.portable AS pp",
-                   {"id": pid}) == [{"pp": portable}]
-        lines = open(s.journal).readlines()
-        assert len(lines) == before + 1, \
-            "backfill_portable must journal exactly one line, or rebuild forgets it"
-        entry = json.loads(lines[-1])
-        assert entry["op"] == "project_portable", entry
-        assert entry["project_id"] == pid and entry["portable"] == portable, entry
+    with tempfile.TemporaryDirectory() as tmp_home:
+        with Store(pathlib.Path(tmp_home), write=True) as s:
+            # An existing, portable-less node — the exact shape backfill_portable
+            # requires before it will write anything.
+            upsert_project(s, {"id": pid, "path": pid, "name": "bp", "portable": None})
+            before = len(journal_lines(s))
 
-        # Idempotent: the node already carries a portable id now, so a second
-        # call must neither write again nor journal again.
-        backfill_portable(s, {"id": pid, "portable": portable})
-        assert sum(1 for _ in open(s.journal)) == before + 1, \
-            "backfill_portable must not re-journal once the node carries a portable id"
+            backfill_portable(s, {"id": pid, "portable": portable})
+            assert s.q("MATCH (p:Project {id:$id}) RETURN p.portable AS pp",
+                       {"id": pid}) == [{"pp": portable}]
+            lines = journal_lines(s)
+            assert len(lines) == before + 1, \
+                "backfill_portable must journal exactly one line, or rebuild forgets it"
+            entry = json.loads(lines[-1])
+            assert entry["op"] == "project_portable", entry
+            assert entry["project_id"] == pid and entry["portable"] == portable, entry
+            # Spec A4: every journal line carries its schema version. Without
+            # the stamp, replay_entry's refusal of a future version has
+            # nothing to read and a v2 line replays as v1 — the exact
+            # half-succeeding rebuild the version exists to prevent.
+            assert entry.get("v") == SCHEMA, \
+                f"Store.log must stamp the schema version on every line: {entry}"
 
-        # Simulate the loss `rebuild` would cause without it: what a graph
-        # freshly rebuilt up to (but not including) this journal line would
-        # look like, then replay just this line.
-        s.q("MATCH (p:Project {id:$id}) SET p.portable=null", {"id": pid})
-        assert s.q("MATCH (p:Project {id:$id}) RETURN p.portable AS pp",
-                   {"id": pid}) == [{"pp": None}]
-        replay_entry(s, entry)
-        assert s.q("MATCH (p:Project {id:$id}) RETURN p.portable AS pp",
-                   {"id": pid}) == [{"pp": portable}], \
-            "a backfilled portable id must survive a replay"
+            # And the stamp must win over the payload. It is spread AFTER
+            # **payload for this reason, so a payload key called "v" cannot
+            # shadow it; written the other way round the stamping stops with
+            # no visible error anywhere.
+            s.log("project_portable", {"project_id": pid, "portable": portable, "v": 99})
+            shadowed = json.loads(journal_lines(s)[-1])
+            assert shadowed.get("v") == SCHEMA, \
+                f"a payload key named 'v' must not shadow the schema stamp: {shadowed}"
 
-        # Replay must never create the node this line refers to — brief's own
-        # never-create rule extends to the journal line it writes.
-        s.q("MATCH (p:Project {id:$id}) DETACH DELETE p", {"id": pid})
-        replay_entry(s, entry)
-        assert s.q("MATCH (p:Project {id:$id}) RETURN p.id AS id", {"id": pid}) == [], \
-            "replaying a project_portable line must not create a node"
-    finally:
-        s.q("MATCH (p:Project {id:$id}) DETACH DELETE p", {"id": pid})
+            # Simulate the loss `rebuild` would cause without it: what a graph
+            # freshly rebuilt up to (but not including) this journal line would
+            # look like, then replay just this line.
+            s.q("MATCH (p:Project {id:$id}) SET p.portable=null", {"id": pid})
+            assert s.q("MATCH (p:Project {id:$id}) RETURN p.portable AS pp",
+                       {"id": pid}) == [{"pp": None}]
+            replay_entry(s, entry)
+            assert s.q("MATCH (p:Project {id:$id}) RETURN p.portable AS pp",
+                       {"id": pid}) == [{"pp": portable}], \
+                "a backfilled portable id must survive a replay"
+
+            # Idempotent: the node carries a portable id again, so a further
+            # call must neither write nor journal.
+            journalled = len(journal_lines(s))
+            backfill_portable(s, {"id": pid, "portable": portable})
+            assert len(journal_lines(s)) == journalled, \
+                "backfill_portable must not re-journal once the node carries a portable id"
+
+            # Replay must never create the node this line refers to — brief's own
+            # never-create rule extends to the journal line it writes.
+            s.q("MATCH (p:Project {id:$id}) DETACH DELETE p", {"id": pid})
+            replay_entry(s, entry)
+            assert s.q("MATCH (p:Project {id:$id}) RETURN p.id AS id", {"id": pid}) == [], \
+                "replaying a project_portable line must not create a node"
 
 
 def cmd_selftest(a, s: Store) -> None:
@@ -2369,7 +2401,7 @@ def cmd_selftest(a, s: Store) -> None:
     _check_verdicts(s)
     _check_maintain(s)
     _check_identity(s)
-    _check_backfill_replay(s)
+    _check_backfill_replay()
     after = s.q("MATCH (n) RETURN count(n) AS n")[0]["n"]
     assert after == before, f"selftest changed node count {before} -> {after}"
     print(f"selftest ok ({before} nodes, unchanged)")
