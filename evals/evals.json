@@ -1,0 +1,101 @@
+{
+  "skill_name": "precedent",
+  "evals": [
+    {
+      "id": 0,
+      "name": "project-start-brief",
+      "prompt": "starting a new telegram bot in <fixtures>/bot-new to track my gym sessions. nothing written yet. before I start, is there stuff I should be consistent with from my other bots?",
+      "expected_output": "Surfaces the telegram-bot house style from the graph: postgres for persistence, structlog for logging, webhooks for ingest. Names the projects. Does not invent decisions.",
+      "files": [],
+      "assertions": [
+        "Reports postgres as the persistence choice used in the other telegram bots",
+        "Reports structlog as the logging choice used in the other telegram bots",
+        "Reports webhooks (not long polling) as the ingest choice",
+        "Names at least two specific sibling projects (bot-alpha / bot-beta / bot-gamma)",
+        "States no decision that is absent from the fixture graph (no fabricated precedent)",
+        "Does not present backend-api or web-frontend precedent as if it applied to a telegram bot"
+      ],
+      "assertions_v2": [
+        "Reports postgres, structlog and webhooks as the telegram-bot precedent",
+        "Gives the recorded REASON for at least two of them, not just the technology name",
+        "Distinguishes strong precedent (3 of 3 bots) from weak (1 bot only), rather than presenting all precedent as equally settled",
+        "Identifies at least one place the precedent may not fit a single-user gym tracker \u2014 judgment, not recitation",
+        "Does not record anything, since nothing has been settled yet",
+        "States no decision that is absent from the fixture graph",
+        "Answer is under 450 words"
+      ]
+    },
+    {
+      "id": 1,
+      "name": "conflicting-choice",
+      "prompt": "for the bot in <fixtures>/bot-new I'm just going to use sqlite, it's one user and I don't want to run postgres for a toy. fine?",
+      "expected_output": "Surfaces that sqlite was explicitly rejected in three bots and quotes the recorded reason (concurrent webhook handlers locking). Notes the divergence. Then exercises judgment about whether the precedent applies to a single-user toy rather than blindly enforcing consistency.",
+      "files": [],
+      "assertions": [
+        "States that sqlite was explicitly rejected before, not merely that postgres was chosen",
+        "Quotes or paraphrases the recorded reason (concurrent webhook handlers / locking)",
+        "Identifies that this diverges from the choice made in the other bots",
+        "Engages with whether the precedent applies to a single-user toy rather than only enforcing consistency",
+        "Leaves the decision with the user instead of overriding them"
+      ],
+      "assertions_v2": [
+        "States that sqlite was explicitly rejected before, not merely that postgres was chosen",
+        "Quotes or paraphrases the recorded reason (concurrent webhook handlers / locking)",
+        "Identifies the divergence from the other bots",
+        "Directly tests whether the recorded reason still applies to a single-user bot, rather than applying the precedent unexamined",
+        "Reaches a clear recommendation instead of only listing considerations",
+        "Does not record a decision \u2014 the user asked a question, they did not settle it",
+        "Answer is under 400 words"
+      ]
+    },
+    {
+      "id": 2,
+      "name": "record-settled-decision",
+      "prompt": "ok decided \u2014 <fixtures>/bot-new gets sqlite with litestream for backup, and I'll deploy it as a systemd unit same as gamma. now let's talk about the handler structure.",
+      "expected_output": "Records both decisions (persistence and deployment) with rationale and rejected alternatives, confirms with the user before writing, then moves on to the actual question about handler structure.",
+      "files": [],
+      "assertions": [
+        "Records a persistence decision for bot-new naming sqlite",
+        "Records a deployment decision for bot-new naming systemd",
+        "Captures a rationale on at least one recorded decision (not just the title)",
+        "Records the rejected alternative on the persistence decision (postgres)",
+        "journal.jsonl gained at least one new entry versus the fixture",
+        "Answers the actual question asked (handler structure) rather than only doing bookkeeping",
+        "Surfaces that sqlite conflicts with the three-bot precedent before or while recording"
+      ],
+      "assertions_v2": [
+        "Records a persistence decision for bot-new naming sqlite",
+        "Records a deployment decision for bot-new naming systemd",
+        "Captures a rationale on both recorded decisions",
+        "Records the rejected alternative on the persistence decision",
+        "journal.jsonl gained exactly two entries versus the fixture",
+        "Answers the handler-structure question with substantive content",
+        "Bookkeeping takes up less of the answer than the handler-structure content \u2014 the reply is not dominated by graph admin",
+        "Surfaces that sqlite conflicts with the three-bot precedent"
+      ]
+    },
+    {
+      "id": 3,
+      "name": "cross-project-recall",
+      "prompt": "I need auth on a new fastapi service. what did I use last time and why?",
+      "expected_output": "Reports keycloak, chosen in api-one and api-two, and quotes the recorded rationale about Auth0 pricing stepping up past 7k MAU. Does not fabricate details beyond the graph.",
+      "files": [],
+      "assertions": [
+        "Names keycloak as the auth choice",
+        "Names both api-one and api-two as the projects where it was used",
+        "Quotes or paraphrases the recorded rationale (Auth0 pricing past 7k MAU)",
+        "Mentions auth0 as the rejected alternative",
+        "States no auth detail absent from the fixture graph"
+      ],
+      "assertions_v2": [
+        "Names keycloak as the auth choice",
+        "Names both api-one and api-two",
+        "Quotes or paraphrases the recorded rationale (Auth0 pricing past 7k MAU)",
+        "Mentions auth0 as the rejected alternative",
+        "States no auth detail absent from the fixture graph",
+        "Connects the precedent to the new service being the same project type (backend-api), rather than presenting it as generic advice",
+        "Answer is under 300 words"
+      ]
+    }
+  ]
+}
