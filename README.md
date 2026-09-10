@@ -60,12 +60,23 @@ Optionally, prime every session automatically — add to `~/.claude/settings.jso
 {
   "hooks": {
     "SessionStart": [
-      { "hooks": [ { "type": "command",
-                     "command": "$HOME/.claude/skills/precedent/hooks/session-start.sh" } ] }
+      {
+        "matcher": "*",
+        "hooks": [
+          { "type": "command",
+            "command": "$HOME/.claude/skills/precedent/hooks/session-start.sh",
+            "platforms": ["linux", "darwin"] },
+          { "type": "command",
+            "command": "powershell -NoProfile -ExecutionPolicy Bypass -File $HOME/.claude/skills/precedent/hooks/session-start.ps1",
+            "platforms": ["win32"] }
+        ]
+      }
     ]
   }
 }
 ```
+
+On Windows, `session-start.ps1` runs in place of the `.sh` script; `hooks.json` alongside both scripts pins which one runs per platform.
 
 The hook runs a brief for the working directory and injects it, so a session
 opens already knowing what you decided here and in comparable projects. It stays

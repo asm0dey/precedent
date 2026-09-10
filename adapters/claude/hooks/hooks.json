@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "*",
+        "hooks": [
+          { "type": "command",
+            "command": "$CLAUDE_PLUGIN_ROOT/hooks/session-start.sh",
+            "platforms": ["linux", "darwin"] },
+          { "type": "command",
+            "command": "powershell -NoProfile -ExecutionPolicy Bypass -File $CLAUDE_PLUGIN_ROOT/hooks/session-start.ps1",
+            "platforms": ["win32"] }
+        ]
+      }
+    ]
+  }
+}
