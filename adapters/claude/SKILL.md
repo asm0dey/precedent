@@ -44,14 +44,15 @@ should now inform the rest of the session.
 
 ## Standing orders
 
+The session-start hook prints the standing orders automatically. To see them
+without a hook, or from another agent:
+
+    uv run scripts/precedent.py standing-orders
+
 You are reading this once, and then the conversation continues for another hour.
 Everything below has to survive that. Treat these as active for the rest of the
 session, not as a script you run now and forget:
 
-- **Before you recommend a technology, provider, or process** — run `check` and
-  lead with what it returns. This applies to the choice you are about to make in
-  turn 40 as much as the one in turn 2. Your training-data opinion is worth less
-  than what this user already chose and then lived with for a year.
 - **Then test the rationale against the case in front of you.** A recorded
   decision is an answer plus the conditions that produced it. Read the
   `--rationale`, name the condition it depends on, and say whether that condition

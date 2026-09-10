@@ -50,8 +50,8 @@ rejected: it saves 11 ms per call, both paths being dominated by the ~50 ms
 
 ```bash
 git clone https://github.com/asm0dey/precedent ~/src/precedent
-ln -s ~/src/precedent ~/.claude/skills/precedent
-ln -s ~/src/precedent/commands/*.md ~/.claude/commands/
+ln -s ~/src/precedent/adapters/claude ~/.claude/skills/precedent
+ln -s ~/src/precedent/adapters/claude/commands/*.md ~/.claude/commands/
 ```
 
 Optionally, prime every session automatically — add to `~/.claude/settings.json`:
@@ -159,8 +159,8 @@ symlinks the default path at it, so the hook and the slash commands keep working
 with no configuration:
 
 ```bash
-uv run ~/.claude/skills/precedent/scripts/precedent.py init ~/Sync/precedent
-uv run ~/.claude/skills/precedent/scripts/precedent.py init   # where is it now?
+uv run ~/src/precedent/scripts/precedent.py init ~/Sync/precedent
+uv run ~/src/precedent/scripts/precedent.py init   # where is it now?
 ```
 
 Better than `PRECEDENT_HOME`, which the SessionStart hook never sees. Two
