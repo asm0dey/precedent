@@ -1,6 +1,6 @@
 ---
 name: precedent
-description: Remember and reuse the user's architectural, business, and tooling decisions across every project, in a queryable graph. Use this skill whenever the user settles a non-trivial choice (database, framework, auth, deployment, pricing, process) so it gets recorded; whenever they start work in a project you have not briefed on yet, including one that predates the graph and whose decisions are only visible in its manifests, CI and docs; whenever they weigh options and ask "which should I use" or "what did I do last time"; and whenever they ask what they have already decided, whether a choice is consistent with their other projects, or what decisions they still owe this project. Trigger it even when the user does not mention decisions, memory, or the graph — the point is that they should not have to remember to ask.
+description: Remember and reuse the user's architectural, business, and tooling decisions across every project, in a queryable graph. Use this skill whenever the user settles a non-trivial choice (database, framework, auth, deployment, pricing, process) so it gets recorded; whenever they start work in a project you have not briefed on yet, including one that predates the graph and whose decisions are only visible in its manifests, CI and docs; whenever they weigh options and ask "which should I use" or "what did I do last time"; whenever they say a past choice was a mistake, that it bit them, or that they would not do it that way again; whenever they knowingly depart here from how they usually do it; and whenever they ask what they have already decided, whether a choice is consistent with their other projects, or what decisions they still owe this project. Trigger it even when the user does not mention decisions, memory, or the graph — the point is that they should not have to remember to ask.
 ---
 
 # Decision graph
@@ -64,6 +64,27 @@ session, not as a script you run now and forget:
 - **When a project you are working in has nothing recorded** — offer to backfill
   it once (`/precedent-analyze`), then drop it. An empty project is why precedent
   is thin everywhere else; nagging about it is why the user turns the skill off.
+
+Nothing here is reached by the user typing a command. They will say an ordinary
+sentence and move on, and you are the one who has to notice:
+
+| What the user says | What it is | What you run |
+|---|---|---|
+| "let's go with X", "we'll use X", the argument stops | a decision | `record` |
+| "what did I use last time", "which should I use" | a question for the graph | `check` |
+| "X was a mistake", "X bit us", "never again", "I regret X" | a lesson, not a new decision | `regret` |
+| "I know I usually do X, but here…" | a knowing exception | `record --despite` |
+| "actually, for this project, X now" | a replacement in one project | `record --supersedes` |
+| "none of this repo's decisions are in there" | a backfill | `/precedent-analyze` |
+
+The two that get confused are the third and fifth. Changing your mind in one
+project is `--supersedes`: the old choice stays a norm everywhere else. Deciding
+the *pattern* was wrong is `regret`: it marks every project that made that
+choice and stops the graph arguing for it again. Ask which one they mean when
+the sentence is ambiguous — "we're moving off mongo" is either.
+
+Offer, do not act. Draft the command, show the one-line summary, run it when
+they confirm.
 
 The failure mode this guards against is not refusing to use the graph; it is
 using it once, at the start, and then spending the rest of the session

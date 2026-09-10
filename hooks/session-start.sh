@@ -25,6 +25,12 @@ Standing orders for the rest of this session:
 - When a choice gets settled in conversation, offer to record it, then run
   \`uv run $DG record ...\` with --rationale and --rejected. Ask first; a wrong
   entry is worse than a missing one because it gets quoted back as precedent.
+- The user will not type a command. They say an ordinary sentence, and you notice:
+  "let's go with X" -> \`record\`. "what did I use last time" -> \`check\`.
+  "X was a mistake" / "X bit us" / "never again" -> \`regret\` (marks every project
+  that chose it, so the graph stops arguing for it), NOT another \`record\`.
+  "I usually do X, but here..." -> \`record --despite\`. Draft it, show one line,
+  run it once they confirm.
 - Precedent is information, not a veto. Say when consistency is wrong here.
 Full guidance: $HOME/.claude/skills/precedent/SKILL.md
 PRIME
