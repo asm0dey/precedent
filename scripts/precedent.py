@@ -1842,9 +1842,17 @@ def _check_verdicts(s: Store) -> None:
     # ("selftest-author" contains "selftest-auth") without being ABOUT it.
     # Only the edge may decide — this is Task 5's exact-match rule applied
     # to Principle, which previously had no edge to match on at all.
+    # project_id/project use `here`, not a literal "/tmp" — Task 10 fixed the
+    # exact macOS mismatch a literal produces (/tmp resolves to /private/tmp),
+    # and cmd_check's `diverged` branch is the part of this query that
+    # resolves a.project through pathlib. It only runs when 2+ projects chose
+    # a different option than $chose for the topic, which is not true for the
+    # single-option fixture below — but a later block on this same topic
+    # would make it true, so this stays consistent with Task 7's fixture
+    # rather than relying on that being dead code forever.
     pd = {"id": "selftest-p1", "title": "T", "statement": "T", "rationale": "r",
           "scope": "architecture", "created": today(),
-          "project_id": "/tmp/precedent-selftest-p", "project_name": "p",
+          "project_id": here, "project_name": "p",
           "tags": [], "topics": ["selftest-auth"], "chose": ["oidc"],
           "rejected": [], "supersedes": []}
     try:
@@ -1860,7 +1868,7 @@ def _check_verdicts(s: Store) -> None:
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             cmd_check(_argparse.Namespace(topic="selftest-auth",
-                                          chose="oidc", project="/tmp"), s)
+                                          chose="oidc", project=here), s)
         text = out.getvalue()
         assert "PRINCIPLE" not in text, \
             f"'selftest-author' in the prose must not match topic 'selftest-auth':\n{text}"
@@ -1870,16 +1878,60 @@ def _check_verdicts(s: Store) -> None:
         out2 = io.StringIO()
         with contextlib.redirect_stdout(out2):
             cmd_check(_argparse.Namespace(topic="selftest-auth",
-                                          chose="oidc", project="/tmp"), s)
+                                          chose="oidc", project=here), s)
         assert "PRINCIPLE" in out2.getvalue(), \
             f"a principle with the topic edge must surface:\n{out2.getvalue()}"
     finally:
         s.q("MATCH (pr:Principle {id:'selftest-p'}) DETACH DELETE pr")
         s.q("MATCH (n) WHERE n.id STARTS WITH 'selftest-p' DETACH DELETE n")
-        s.q("MATCH (p:Project {id:'/tmp/precedent-selftest-p'}) DETACH DELETE p")
+        s.q("MATCH (p:Project {id:$id}) DETACH DELETE p", {"id": here})
         for name in ("selftest-auth", "selftest-p-other", "oidc"):
             s.q("""MATCH (n) WHERE (n:Topic OR n:Option) AND n.name = $name
                      AND NOT EXISTS { MATCH (n)<--() } DETACH DELETE n""", {"name": name})
+
+    # cmd_principle and replay_entry both mutate the graph the same way the
+    # existing tests above never touch: through s.log, which appends a real
+    # line to the journal. Exercising that against the running selftest
+    # store would grow /tmp/precedent-plan/journal.jsonl on every run and
+    # break "leave the filesystem exactly as it found it" — so this runs
+    # against its own throwaway Store in its own throwaway directory, which
+    # tempfile.TemporaryDirectory removes completely on exit. Without this,
+    # the query fix above is tested but the feature that populates the edge
+    # (--topic on `principle`, and its replay) is not — the same shape as
+    # Task 2b's lock-mode check once proving the library rather than the
+    # code's use of it.
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp_home:
+        with Store(pathlib.Path(tmp_home), write=True) as ps:
+            with contextlib.redirect_stdout(io.StringIO()):
+                cmd_principle(_argparse.Namespace(
+                    id="selftest-p2", statement="selftest-p2 statement",
+                    derived_from="", topic="selftest-p2-topic"), ps)
+            written = ps.q("""MATCH (pr:Principle {id:'selftest-p2'})
+                                    -[:ABOUT]->(t:Topic {name:'selftest-p2-topic'})
+                              RETURN pr.id AS id""")
+            assert written, "cmd_principle --topic must create the ABOUT edge"
+
+            # Drop the edge to simulate a graph rebuilt from the journal
+            # alone, then replay the exact payload cmd_principle wrote
+            # (topics included) and confirm replay recreates it. This is the
+            # silent-data-loss path: without it, a principle recorded today
+            # would carry its topics in the journal but lose them on the
+            # next rebuild, and `check` would stop surfacing it with no
+            # error anywhere.
+            ps.q("""MATCH (:Principle {id:'selftest-p2'})-[r:ABOUT]->(:Topic)
+                    DELETE r""")
+            gone = ps.q("""MATCH (pr:Principle {id:'selftest-p2'})-[:ABOUT]->(:Topic)
+                           RETURN pr.id AS id""")
+            assert not gone, "edge must be gone before replay is exercised"
+            replay_entry(ps, {"op": "principle", "id": "selftest-p2",
+                              "statement": "selftest-p2 statement",
+                              "derived_from": [], "topics": ["selftest-p2-topic"],
+                              "ts": today()})
+            replayed = ps.q("""MATCH (pr:Principle {id:'selftest-p2'})
+                                     -[:ABOUT]->(t:Topic {name:'selftest-p2-topic'})
+                               RETURN pr.id AS id""")
+            assert replayed, "replay_entry must recreate the ABOUT edge from topics"
 
 
 def _check_maintain(s: Store) -> None:
