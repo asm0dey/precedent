@@ -3,21 +3,16 @@
 # requires-python = ">=3.12"
 # dependencies = ["pyyaml"]
 # ///
-"""Generate plugin.json from agent-plugin.yaml.
+"""Generate .claude-plugin/plugin.json from agent-plugin.yaml.
 
-ADR 0005: agent-plugin.yaml is meant to be the richer format so plugin.json is
-a downhill projection of it. Against ACR's real v1 schema that premise only
-holds partially — ACR has no `commands` artifact class and no per-agent
-section, so the 9 Claude Code slash commands cannot be expressed there at all.
-Rather than hardcode a second command list here (the exact drift ADR 0005
-exists to avoid), `commands` is derived from a sorted glob of
-adapters/claude/commands/*.md — sorted so the result is deterministic and
---check cannot fail on directory-listing order alone. `hooks` is derived from
-the ACR session-start hook entry's own path: its containing directory is where
-Claude Code's hooks.json manifest lives, so that path is reconstructed rather
-than written out a second time. `license` is dropped entirely — it is not a
-field ACR v1 carries, and hardcoding it uphill is exactly the drift this
-generator exists to prevent.
+ADR 0005: agent-plugin.yaml is the richer format and plugin.json is a downhill
+projection of it. Claude Code's plugin.json only needs name/description/version
+here — commands, hooks and skills are all discovered by convention from
+adapters/claude/'s layout (commands/*.md, hooks/hooks.json, a root SKILL.md as
+the single-skill form), so nothing else has to be enumerated, glob'd, or
+derived. Enumerating them would be both unnecessary and, in Claude Code's
+actual schema, illegal (paths there are plugin-root-relative with a leading
+./, not repo-relative).
 """
 import json
 import pathlib
@@ -27,31 +22,15 @@ import yaml
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SOURCE = ROOT / "agent-plugin.yaml"
-TARGET = ROOT / "plugin.json"
-COMMANDS_DIR = ROOT / "adapters" / "claude" / "commands"
+TARGET = ROOT / "adapters" / "claude" / ".claude-plugin" / "plugin.json"
 
 
 def project(acr: dict) -> dict:
     """Project the ACR manifest onto Claude Code's plugin.json shape."""
-    artifacts = acr["artifacts"]
-
-    session_start = next(
-        h for h in artifacts.get("hooks", []) if h["event"] == "session-start"
-    )
-    hooks_dir = pathlib.PurePosixPath(session_start["path"]).parent
-    hooks_manifest = (hooks_dir / "hooks.json").as_posix()
-
-    commands = sorted(
-        p.relative_to(ROOT).as_posix() for p in COMMANDS_DIR.glob("*.md")
-    )
-
     return {
-        "name": acr["name"],
+        "name": acr["name"].split("/")[-1],
         "description": " ".join(acr["description"].split()),
         "version": acr["version"],
-        "skills": [s["path"] for s in artifacts.get("skills", [])],
-        "commands": commands,
-        "hooks": [hooks_manifest],
     }
 
 
@@ -66,8 +45,9 @@ def main() -> int:
             return 1
         print(f"{TARGET.name} is current")
         return 0
+    TARGET.parent.mkdir(parents=True, exist_ok=True)
     TARGET.write_text(generated)
-    print(f"wrote {TARGET.name}")
+    print(f"wrote {TARGET.relative_to(ROOT)}")
     return 0
 
 
