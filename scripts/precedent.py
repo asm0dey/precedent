@@ -148,8 +148,12 @@ class Store:
     def log(self, op: str, payload: dict) -> None:
         """Journal first, then mutate. A crash between the two costs a replay, not data."""
         with open(self.journal, "a") as f:
+            # "v" is spread AFTER **payload, not before: a payload key named
+            # "v" must never silently override the schema stamp — that would
+            # stop stamping without a visible error, and a later replay could
+            # fail to refuse a line it should have refused.
             f.write(json.dumps({"ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                                "v": SCHEMA, "op": op, **payload}) + "\n")
+                                "op": op, **payload, "v": SCHEMA}) + "\n")
             f.flush()
             os.fsync(f.fileno())
 
@@ -1675,8 +1679,18 @@ def _check_journal(s: Store) -> None:
         raise AssertionError("a future schema version must not replay")
     except JournalTooNew as exc:
         assert "selftest-future" in str(exc), exc
-    # An entry with no version is pre-versioning, and replays as v1.
+    # The refused attempt above must leave no trace — a caught exception is
+    # not proof by itself that nothing was written first.
     assert s.q("MATCH (d:Decision {id:'selftest-future'}) RETURN d.id AS id") == []
+
+    # An entry with no "v" key is pre-versioning and must still replay as v1 —
+    # this is the property that keeps every line already in the user's real
+    # journal (none of which carry a "v" key) readable.
+    replay_entry(s, {"op": "record", "id": "selftest-noversion",
+                     "project_id": "selftest-noversion-proj", "project_name": "selftest"})
+    assert s.q("MATCH (d:Decision {id:'selftest-noversion'}) RETURN d.id AS id") \
+        == [{"id": "selftest-noversion"}], "a v-less entry must still replay as v1"
+    s.q("MATCH (n) WHERE n.id STARTS WITH 'selftest-noversion' DETACH DELETE n")
 
 
 def cmd_selftest(a, s: Store) -> None:
