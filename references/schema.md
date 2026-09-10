@@ -12,7 +12,7 @@ Read this before writing ad-hoc Cypher via `precedent.py cypher`. The engine is 
 | `Tag` | `name` | — |
 | `Topic` | `name` (lowercased) | — |
 | `Option` | `name` | — |
-| `Principle` | `id` | `statement`, `created` |
+| `Principle` | `id` | `statement`, `created` (see `check`'s use of `ABOUT` below) |
 | `Lesson` | `id` | `statement`, `topic`, `option`, `instead`, `created` |
 
 `Decision.scope` ∈ `architecture` `business` `process` `tooling` `product`.
@@ -44,10 +44,17 @@ what is in use, and `--add` refuses near-duplicates.
 (Decision)-[:REJECTED]->(Option)
 (Decision)-[:SUPERSEDES]->(Decision)
 (Principle)-[:DERIVED_FROM]->(Decision)
+(Principle)-[:ABOUT]->(Topic)
 (Project)-[:TAGGED]->(Tag)
 (Lesson)-[:REGRETS]->(Decision)
 (Decision)-[:DIVERGES_FROM]->(Decision)
 ```
+
+`check` finds principles in play by matching `(Principle)-[:ABOUT]->(Topic {name:$topic})`,
+never by scanning `Principle.statement` — matching stays exact and structural, the same
+rule Topic and Tag already follow (see `docs/adr/0001`). A `Principle` created with no
+`--topic` gets no `ABOUT` edge and is therefore invisible to `check`; `principle` warns
+about this at creation time.
 
 Cross-project precedent is tag overlap, not a stored edge:
 

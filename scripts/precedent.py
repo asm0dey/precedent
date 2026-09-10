@@ -498,14 +498,21 @@ def apply_regret(s: Store, e: dict) -> None:
 
 
 def cmd_principle(a, s: Store) -> None:
-    p = {"id": a.id, "statement": a.statement, "derived_from": csv(a.derived_from)}
+    p = {"id": a.id, "statement": a.statement, "derived_from": csv(a.derived_from),
+         "topics": [t.lower() for t in csv(a.topic)]}
     s.log("principle", p)
     s.q("""MERGE (pr:Principle {id:$id}) SET pr.statement=$statement, pr.created=$created""",
         {**p, "created": today()})
+    for topic in p["topics"]:
+        s.q("MERGE (t:Topic {name:$n})", {"n": topic})
+        s.q("""MATCH (pr:Principle {id:$id}),(t:Topic {name:$n})
+               MERGE (pr)-[:ABOUT]->(t)""", {"id": a.id, "n": topic})
     for did in p["derived_from"]:
         s.q("""MATCH (pr:Principle {id:$id}),(d:Decision {id:$did})
                MERGE (pr)-[:DERIVED_FROM]->(d)""", {"id": a.id, "did": did})
     print(f"principle {a.id}: {a.statement}")
+    if not p["topics"]:
+        print("  note: no --topic, so `check` will never surface this principle.")
 
 
 # ------------------------------------------------------------------------ reading
@@ -743,7 +750,7 @@ def cmd_check(a, s: Store) -> None:
             print(f"  DIVERGENCE: you chose '{r['other']}' for this in"
                   f" {r['n']} other projects{age}")
 
-    violated = s.q("""MATCH (pr:Principle) WHERE pr.statement CONTAINS $t
+    violated = s.q("""MATCH (pr:Principle)-[:ABOUT]->(:Topic {name:$t})
                       RETURN pr.id AS id, pr.statement AS stmt""", {"t": topic})
     for r in violated:
         print(f"  PRINCIPLE in play: {r['stmt']}  #{r['id']}")
@@ -795,6 +802,7 @@ def cmd_suggest(a, s: Store) -> None:
         pid = slug(f"{r['topic']}-{r['opt']}")
         print(f"  '{r['topic']} -> {r['opt']}' holds in {r['n']} projects")
         print(f"     promote: precedent.py principle --id {pid}"
+              f" --topic {r['topic']}"
               f" --statement \"For {r['topic']}, use {r['opt']}.\"")
 
 
@@ -1027,6 +1035,10 @@ def replay_entry(s: Store, e: dict) -> None:
     elif e["op"] == "principle":
         s.q("""MERGE (pr:Principle {id:$id})
                SET pr.statement=$statement, pr.created=$ts""", e)
+        for topic in e.get("topics", []):
+            s.q("MERGE (t:Topic {name:$n})", {"n": topic})
+            s.q("""MATCH (pr:Principle {id:$id}),(t:Topic {name:$n})
+                   MERGE (pr)-[:ABOUT]->(t)""", {"id": e["id"], "n": topic})
         for did in e.get("derived_from", []):
             s.q("""MATCH (pr:Principle {id:$id}),(d:Decision {id:$did})
                    MERGE (pr)-[:DERIVED_FROM]->(d)""", {"id": e["id"], "did": did})
@@ -1826,6 +1838,49 @@ def _check_verdicts(s: Store) -> None:
             s.q("""MATCH (n) WHERE (n:Topic OR n:Option OR n:Tag) AND n.name = $name
                      AND NOT EXISTS { MATCH (n)<--() } DETACH DELETE n""", {"name": name})
 
+    # A principle's prose can contain a topic word as a mere substring
+    # ("selftest-author" contains "selftest-auth") without being ABOUT it.
+    # Only the edge may decide — this is Task 5's exact-match rule applied
+    # to Principle, which previously had no edge to match on at all.
+    pd = {"id": "selftest-p1", "title": "T", "statement": "T", "rationale": "r",
+          "scope": "architecture", "created": today(),
+          "project_id": "/tmp/precedent-selftest-p", "project_name": "p",
+          "tags": [], "topics": ["selftest-auth"], "chose": ["oidc"],
+          "rejected": [], "supersedes": []}
+    try:
+        write_decision(s, pd)
+        # The prose contains the topic word as a substring. Only the edge
+        # should decide, so this principle must NOT surface for selftest-auth.
+        s.q("""MERGE (pr:Principle {id:'selftest-p'})
+               SET pr.statement='Prefer one selftest-author per module.',
+                   pr.created=$c""", {"c": today()})
+        s.q("MERGE (t:Topic {name:'selftest-p-other'})")
+        s.q("""MATCH (pr:Principle {id:'selftest-p'}),(t:Topic {name:'selftest-p-other'})
+               MERGE (pr)-[:ABOUT]->(t)""")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cmd_check(_argparse.Namespace(topic="selftest-auth",
+                                          chose="oidc", project="/tmp"), s)
+        text = out.getvalue()
+        assert "PRINCIPLE" not in text, \
+            f"'selftest-author' in the prose must not match topic 'selftest-auth':\n{text}"
+
+        s.q("""MATCH (pr:Principle {id:'selftest-p'}),(t:Topic {name:'selftest-auth'})
+               MERGE (pr)-[:ABOUT]->(t)""")
+        out2 = io.StringIO()
+        with contextlib.redirect_stdout(out2):
+            cmd_check(_argparse.Namespace(topic="selftest-auth",
+                                          chose="oidc", project="/tmp"), s)
+        assert "PRINCIPLE" in out2.getvalue(), \
+            f"a principle with the topic edge must surface:\n{out2.getvalue()}"
+    finally:
+        s.q("MATCH (pr:Principle {id:'selftest-p'}) DETACH DELETE pr")
+        s.q("MATCH (n) WHERE n.id STARTS WITH 'selftest-p' DETACH DELETE n")
+        s.q("MATCH (p:Project {id:'/tmp/precedent-selftest-p'}) DETACH DELETE p")
+        for name in ("selftest-auth", "selftest-p-other", "oidc"):
+            s.q("""MATCH (n) WHERE (n:Topic OR n:Option) AND n.name = $name
+                     AND NOT EXISTS { MATCH (n)<--() } DETACH DELETE n""", {"name": name})
+
 
 def _check_maintain(s: Store) -> None:
     """One decision choosing redis AND memcached is a stack, not a clash.
@@ -1934,6 +1989,7 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--id", required=True)
     pr.add_argument("--statement", required=True)
     pr.add_argument("--derived-from", default="")
+    pr.add_argument("--topic", default="", help="comma-separated topics this governs")
     pr.set_defaults(writes=True, fn=cmd_principle)
 
     tg = sub.add_parser("tag", help="list the tag vocabulary, or change this project's tags")
