@@ -31,8 +31,8 @@ import sys
 import time
 from datetime import date
 
-HOME = pathlib.Path(os.environ.get("PRECEDENT_HOME",
-                                   pathlib.Path.home() / ".local/share/precedent"))
+DEFAULT_HOME = pathlib.Path.home() / ".local/share/precedent"
+HOME = pathlib.Path(os.environ.get("PRECEDENT_HOME", DEFAULT_HOME))
 SCOPES = ("architecture", "business", "process", "tooling", "product")
 
 
@@ -900,6 +900,73 @@ def replay_entry(s: Store, e: dict) -> None:
         raise ValueError(f"unknown journal op {e.get('op')!r}")
 
 
+def relocate(target: pathlib.Path, default: pathlib.Path = DEFAULT_HOME) -> str:
+    """Keep the store somewhere else, and symlink the default path at it.
+
+    The default path is wired into a dozen places that never see a flag — the
+    SessionStart hook, every slash command, every `uv run precedent.py` typed by
+    hand. A symlink moves the bytes without touching any of them, which an
+    env var cannot do: `PRECEDENT_HOME` is unset in the hook's environment and
+    in every shell the user did not export it from.
+    """
+    import shutil
+
+    target.mkdir(parents=True, exist_ok=True)
+    if target == default:
+        return f"store: {target}  (the default location)"
+
+    if default.is_symlink():
+        # A symlink carries no data, so repointing loses nothing — the old
+        # store stays where it is, intact, in case it was the wrong move.
+        old = os.readlink(default)
+        default.unlink()
+        default.symlink_to(target, target_is_directory=True)
+        return f"store: {target}\n  {default} now points here (was {old}, left untouched)"
+
+    if default.exists():
+        if not default.is_dir():
+            raise SystemExit(f"{default} exists and is not a directory; move it aside first")
+        # `.lock` is recreated on every run and never carries state.
+        payload = [f for f in default.iterdir() if f.name != ".lock"]
+        occupied = [f for f in target.iterdir() if f.name != ".lock"]
+        if payload and occupied:
+            raise SystemExit(
+                f"both {default} and {target} hold a store; refusing to merge.\n"
+                f"  merging is a journal concatenation, so do it deliberately:\n"
+                f"    cat {default}/journal.jsonl >> {target}/journal.jsonl\n"
+                f"    mv {default} {default}.bak\n"
+                f"  then re-run this, and `precedent.py rebuild`.")
+        for f in payload:
+            shutil.move(str(f), str(target / f.name))
+        shutil.rmtree(default)
+        moved = f"  moved {len(payload)} file(s) from the default location\n" if payload else ""
+    else:
+        moved = ""
+
+    default.parent.mkdir(parents=True, exist_ok=True)
+    default.symlink_to(target, target_is_directory=True)
+    return f"store: {target}\n{moved}  {default} -> {target}"
+
+
+def cmd_init(a) -> None:
+    """Runs without a Store: opening one would create the default directory
+    that this command may be about to replace with a symlink."""
+    if not a.location:
+        d = DEFAULT_HOME
+        if d.is_symlink():
+            print(f"store: {d.resolve()}  (via symlink at {d})")
+        elif d.exists():
+            print(f"store: {d}  (the default location)")
+        else:
+            print(f"no store yet; it will be created at {d}")
+        if os.environ.get("PRECEDENT_HOME"):
+            print(f"  note: PRECEDENT_HOME is set to {os.environ['PRECEDENT_HOME']},"
+                  " which overrides the above for this shell only —"
+                  " the SessionStart hook will not see it.")
+        return
+    print(relocate(pathlib.Path(a.location).expanduser().resolve()))
+
+
 def cmd_cypher(a, s: Store) -> None:
     for row in s.q(a.query, json.loads(a.params) if a.params else None):
         print(row)
@@ -1025,6 +1092,36 @@ def cmd_selftest(a, s: Store) -> None:
         s.q("""MATCH (n) WHERE (n:Topic OR n:Option OR n:Tag) AND n.name = $name
                  AND NOT EXISTS { MATCH (n)<--() } DETACH DELETE n""", {"name": name})
 
+    # Relocation moves the only copy of the journal, so every branch is checked.
+    import shutil as _sh
+    base = pathlib.Path("/tmp/precedent-selftest-home")
+    _sh.rmtree(base, ignore_errors=True)
+    dflt, tgt = base / "default", base / "elsewhere"
+    relocate(tgt, dflt)
+    assert dflt.is_symlink() and dflt.resolve() == tgt.resolve(), "fresh default must be linked"
+
+    _sh.rmtree(base); dflt.mkdir(parents=True)
+    (dflt / "journal.jsonl").write_text("x\n"); (dflt / ".lock").write_text("")
+    relocate(tgt, dflt)
+    assert (tgt / "journal.jsonl").read_text() == "x\n", "an existing store must move, not vanish"
+    assert dflt.is_symlink(), "and the default path must end up pointing at it"
+
+    (dflt / "journal.jsonl").write_text("y\n")     # writes through the link
+    second = base / "second"; second.mkdir()
+    relocate(second, dflt)
+    assert dflt.resolve() == second.resolve() and (tgt / "journal.jsonl").exists(), \
+        "repointing a symlink must leave the old store intact"
+
+    _sh.rmtree(base); dflt.mkdir(parents=True); tgt.mkdir(parents=True)
+    (dflt / "journal.jsonl").write_text("a\n"); (tgt / "journal.jsonl").write_text("b\n")
+    try:
+        relocate(tgt, dflt)
+        raise AssertionError("two populated stores must not be merged silently")
+    except SystemExit:
+        pass
+    assert (dflt / "journal.jsonl").read_text() == "a\n"
+    _sh.rmtree(base)
+
     after = s.q("MATCH (n) RETURN count(n) AS n")[0]["n"]
     assert after == before, f"selftest changed node count {before} -> {after}"
     print(f"selftest ok ({before} nodes, unchanged)")
@@ -1109,6 +1206,11 @@ def main(argv=None) -> int:
 
     sub.add_parser("rebuild", help="replay journal.jsonl into a fresh graph").set_defaults(fn=cmd_rebuild)
 
+    it = sub.add_parser("init", help="show where the store lives, or move it elsewhere")
+    it.add_argument("location", nargs="?",
+                    help="directory to keep the store in; the default path is symlinked at it")
+    it.set_defaults(fn=cmd_init)
+
     cy = sub.add_parser("cypher", help="escape hatch")
     cy.add_argument("query")
     cy.add_argument("--params", default="")
@@ -1117,6 +1219,9 @@ def main(argv=None) -> int:
     sub.add_parser("selftest").set_defaults(fn=cmd_selftest)
 
     a = p.parse_args(argv)
+    if a.cmd == "init":
+        cmd_init(a)
+        return 0
     with Store(pathlib.Path(a.home)) as s:
         a.fn(a, s)
     return 0
