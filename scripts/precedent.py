@@ -211,12 +211,12 @@ def normalise_remote(url: str) -> str | None:
     url = url.strip()
     if not url:
         return None
-    url = re.sub(r"^[A-Za-z][A-Za-z0-9+.-]*://", "", url)   # https:// ssh:// git://
+    url, had_scheme = re.subn(r"^[A-Za-z][A-Za-z0-9+.-]*://", "", url)  # https:// ssh:// git://
     url = re.sub(r"^[^/@]*@", "", url)                       # git@ or user:token@
     host, sep, path = url.partition("/")
     if ":" in host:
         host, _, extra = host.partition(":")
-        if not extra.isdigit():                              # scp-style host:owner/repo
+        if not had_scheme:  # scp-style has no port -- a scheme URL can carry one, scp-style can't
             path = f"{extra}/{path}" if sep else extra
     url = f"{host}/{path}".rstrip("/") if path else host
     if url.endswith(".git"):
@@ -2026,6 +2026,10 @@ def _check_identity(s: Store) -> None:
         ("ssh://git@host:2222/o/r.git", "host/o/r"),
         ("https://GitHub.com/Asm0dey/Precedent", "github.com/asm0dey/precedent"),
         ("", None),
+        # A numeric first path segment must not be mistaken for a port: scp-style
+        # syntax has no port, only a scheme URL can carry one (Ruling 24).
+        ("git@host:12345/repo.git", "host/12345/repo"),
+        ("git@host:67890/repo.git", "host/67890/repo"),
     ]:
         assert normalise_remote(raw) == want, f"{raw!r} -> {normalise_remote(raw)!r}"
 
