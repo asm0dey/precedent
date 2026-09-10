@@ -8,7 +8,7 @@ not when the precedent is stale (that is `--supersedes`) and not when it was
 wrong everywhere (that is `/precedent-regret`).
 
 ```bash
-uv run ~/.claude/skills/precedent/scripts/precedent.py record --project . \
+uv run ~/.claude/skills/precedent/../../scripts/precedent.py record --project . \
   --title "..." --topic "..." --chose "..." --rationale "..." \
   --despite "$ARGUMENTS"
 ```

@@ -3,7 +3,7 @@ description: Check the decision graph for contradictions, tag drift and dead pro
 ---
 
 ```bash
-uv run ~/.claude/skills/precedent/scripts/precedent.py maintain
+uv run ~/.claude/skills/precedent/../../scripts/precedent.py maintain
 ```
 
 Report what it finds. Contradictions (one project, one topic, two live answers)

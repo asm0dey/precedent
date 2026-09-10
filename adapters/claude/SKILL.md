@@ -5,15 +5,23 @@ description: Remember and reuse the user's architectural, business, and tooling 
 
 # Decision graph
 
-The user's decisions are scattered across dozens of repos and two years of
-conversations they no longer remember. This skill keeps them in one graph, so a
-choice made in one project informs the next one.
+This is Claude Code's adapter onto `precedent`, a decision graph that also
+reaches Codex and Cursor (see the repo's top-level README for the other
+install channels). The user's decisions are scattered across dozens of repos
+and two years of conversations they no longer remember. The graph keeps them
+in one place, so a choice made in one project informs the next one, from
+whichever agent looks it up.
 
-Everything goes through one script. It handles locking, the append-only journal,
-project typing, and the inference queries, so you write no Cypher for normal work.
+Everything goes through one script, shared by every adapter. It handles
+locking, the append-only journal, project typing, and the inference queries,
+so you write no Cypher for normal work.
+
+`<skill>` below is this file's own directory (`adapters/claude/`, or wherever
+it was symlinked as `~/.claude/skills/precedent`) — the script itself lives
+two levels up, at the repo root's `scripts/precedent.py`.
 
 ```bash
-uv run <skill>/scripts/precedent.py <command> [flags]
+uv run <skill>/../../scripts/precedent.py <command> [flags]
 ```
 
 `uv` fetches the dependency on first run — there is no install step. If `uv` is
@@ -22,8 +30,9 @@ missing, `pip install grafeo` and run with `python`.
 ## Slash commands
 
 These commands make the daily paths reachable without going through this
-document. They live in `commands/` beside this file and are symlinked into
-`~/.claude/commands/`, so they stay versioned with the skill.
+document. They live in `commands/` beside this file. A plugin install
+discovers them there by convention; a manual install symlinks them into
+`~/.claude/commands/` — either way they stay versioned with the skill.
 
 | Command | Does |
 |---|---|
@@ -44,15 +53,16 @@ should now inform the rest of the session.
 
 ## Standing orders
 
+The session-start hook prints the standing orders automatically. To see them
+without a hook, or from another agent:
+
+    uv run <skill>/../../scripts/precedent.py standing-orders
+
 You are reading this once, and then the conversation continues for another hour.
 Everything below has to survive that. Treat these as active for the rest of the
 session, not as a script you run now and forget:
 
-- **Before you recommend a technology, provider, or process** — run `check` and
-  lead with what it returns. This applies to the choice you are about to make in
-  turn 40 as much as the one in turn 2. Your training-data opinion is worth less
-  than what this user already chose and then lived with for a year.
-- **Then test the rationale against the case in front of you.** A recorded
+- **Test the rationale against the case in front of you.** A recorded
   decision is an answer plus the conditions that produced it. Read the
   `--rationale`, name the condition it depends on, and say whether that condition
   holds here. Reporting precedent without doing this is the most common way to
@@ -104,7 +114,7 @@ this session. It costs one command and tells you what the user already settled
 here and in projects like this one.
 
 ```bash
-uv run <skill>/scripts/precedent.py brief --project .
+uv run <skill>/../../scripts/precedent.py brief --project .
 ```
 
 Lead with what's relevant, not the whole dump. If the brief shows precedent that
@@ -132,7 +142,7 @@ model — check before you recommend. Your own opinion is worth less than what
 they already decided and lived with.
 
 ```bash
-uv run <skill>/scripts/precedent.py check --topic persistence --chose postgres
+uv run <skill>/../../scripts/precedent.py check --topic persistence --chose postgres
 ```
 
 Two verdicts are worth interrupting for: `CONFLICT` (they rejected this exact
@@ -169,7 +179,7 @@ record it. Draft the command, show the user the one-line summary, and write it
 once they confirm. Do not narrate the graph mechanics.
 
 ```bash
-uv run <skill>/scripts/precedent.py record \
+uv run <skill>/../../scripts/precedent.py record \
   --title "Postgres for the bot's state" \
   --rationale "Already run it for two other services; SQLite loses on concurrent writers" \
   --scope architecture --topic persistence \
@@ -224,7 +234,7 @@ warning that is correct, unanswerable and permanent, which is exactly how a
 useful signal becomes noise the user learns to scroll past.
 
 ```bash
-uv run <skill>/scripts/precedent.py record --project . \
+uv run <skill>/../../scripts/precedent.py record --project . \
   --title "SQLite for the CLI" --topic persistence --chose sqlite \
   --rationale "embedded in the binary; there is no server to run one against" \
   --despite "this ships as a single-file CLI, so the operational argument for Postgres does not exist here"
@@ -242,7 +252,7 @@ the repeated thing was a mistake. Without saying so, `check` reports *"you chose
 mongo in eight projects"* as a strong norm — and argues for a ninth.
 
 ```bash
-uv run <skill>/scripts/precedent.py regret --topic persistence --chose mongo \
+uv run <skill>/../../scripts/precedent.py regret --topic persistence --chose mongo \
   --because "schema drift made every migration a manual rewrite; we spent more on backfills than the schema-free start ever saved" \
   --instead postgres
 ```
@@ -270,7 +280,7 @@ is hard to distinguish later from one recorded in judgment.
 ### 4. Which decisions are still missing
 
 ```bash
-uv run <skill>/scripts/precedent.py suggest --project .
+uv run <skill>/../../scripts/precedent.py suggest --project .
 ```
 
 Two inferences, both grounded in what the user actually did:
@@ -282,7 +292,7 @@ Two inferences, both grounded in what the user actually did:
   That is no longer a per-project decision; offer to promote it.
 
 ```bash
-uv run <skill>/scripts/precedent.py principle --id persistence-postgres \
+uv run <skill>/../../scripts/precedent.py principle --id persistence-postgres \
   --statement "For persistence, use Postgres unless the workload is single-writer."
 ```
 
@@ -295,8 +305,8 @@ Precedent is found by **tag overlap**, so tags are what make "what did I do in
 my other backend services" work at all. A project carries a set of them:
 
 ```bash
-uv run <skill>/scripts/precedent.py tag --project .                       # see the vocabulary
-uv run <skill>/scripts/precedent.py tag --project . --add backend,java,distributed
+uv run <skill>/../../scripts/precedent.py tag --project .                       # see the vocabulary
+uv run <skill>/../../scripts/precedent.py tag --project . --add backend,java,distributed
 ```
 
 A single type would force a false choice. A service is not `backend-api` OR
@@ -354,9 +364,9 @@ entries with their own tags. Containment falls out of the path — no extra
 schema, nothing to keep in sync.
 
 ```bash
-uv run <skill>/scripts/precedent.py tag --project ./backend  --add backend,java
-uv run <skill>/scripts/precedent.py tag --project ./slackbot --add bot,slack,python
-uv run <skill>/scripts/precedent.py tag --project .          --add monorepo,internal
+uv run <skill>/../../scripts/precedent.py tag --project ./backend  --add backend,java
+uv run <skill>/../../scripts/precedent.py tag --project ./slackbot --add bot,slack,python
+uv run <skill>/../../scripts/precedent.py tag --project .          --add monorepo,internal
 ```
 
 Three consequences worth knowing:
@@ -384,7 +394,7 @@ out comparable work elsewhere.
 `maintain` reports suspected pairs, and one command repairs them:
 
 ```bash
-uv run <skill>/scripts/precedent.py tag --merge tg-bot --into telegram-bot
+uv run <skill>/../../scripts/precedent.py tag --merge tg-bot --into telegram-bot
 ```
 
 Every project carrying the old tag is retagged, the merge is journalled, and
@@ -397,8 +407,8 @@ Tag it when you know what it is — guessing early is worse than waiting.
 ## Keeping it healthy
 
 ```bash
-uv run <skill>/scripts/precedent.py maintain          # report only
-uv run <skill>/scripts/precedent.py maintain --apply  # also delete orphan nodes
+uv run <skill>/../../scripts/precedent.py maintain          # report only
+uv run <skill>/../../scripts/precedent.py maintain --apply  # also delete orphan nodes
 ```
 
 Reports contradictions (one project, one topic, two live answers), projects
@@ -446,12 +456,12 @@ remain the only mechanism for recording.
 
 To keep it somewhere else — a synced folder, an encrypted volume, a private git
 checkout — point `init` at that directory. It moves an existing store there and
-symlinks the default path at it, so the hook and every slash command keep
-working unchanged:
+leaves a pointer file at the default path naming it, so the hook and every
+slash command keep working unchanged:
 
 ```bash
-uv run <skill>/scripts/precedent.py init ~/Sync/precedent
-uv run <skill>/scripts/precedent.py init          # where does it live right now?
+uv run <skill>/../../scripts/precedent.py init ~/Sync/precedent
+uv run <skill>/../../scripts/precedent.py init          # where does it live right now?
 ```
 
 Prefer this over `PRECEDENT_HOME`: the env var is not set in the SessionStart
@@ -466,14 +476,19 @@ diffs and belongs in a private git repo if the user wants history.
 
 The lock is not decoration. Two processes on one embedded graph silently lose
 writes — measured at 120 writes across 6 processes leaving 60 stored, with every
-writer reporting success. Every command takes the lock, so concurrent Claude
-sessions queue instead of clobbering. Never bypass the script to open the graph
-directly.
+writer reporting success. Every command takes the lock, so concurrent
+sessions — Claude Code, Codex, Cursor, or several of them at once — queue
+instead of clobbering. Never bypass the script to open the graph directly.
 
 ```bash
-uv run <skill>/scripts/precedent.py rebuild    # replay journal into a fresh graph
-uv run <skill>/scripts/precedent.py selftest   # verify the install still works
+uv run <skill>/../../scripts/precedent.py rebuild    # replay journal into a fresh graph
+uv run <skill>/../../scripts/precedent.py --home /tmp/precedent-selftest selftest   # verify the install still works
 ```
+
+`--home` is not optional on `selftest`: without it, the check enumerates every
+real Project node in the live store and shells out to `git` in each one's
+directory — expensive and, on a store with stale or removed project paths,
+liable to fail outright. Point it at a scratch directory.
 
 ## Escape hatch
 
@@ -481,7 +496,7 @@ For a question the subcommands do not answer, query the graph directly. The
 schema is in `references/schema.md` — read it before writing Cypher.
 
 ```bash
-uv run <skill>/scripts/precedent.py cypher "MATCH (d:Decision)-[:CHOSE]->(o:Option {name:'postgres'}) RETURN d.title AS t"
+uv run <skill>/../../scripts/precedent.py cypher "MATCH (d:Decision)-[:CHOSE]->(o:Option {name:'postgres'}) RETURN d.title AS t"
 ```
 
 Prefer a subcommand where one fits. Ad-hoc Cypher is easy to get subtly wrong,

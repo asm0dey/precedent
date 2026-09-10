@@ -1,8 +1,9 @@
 # precedent
 
-A Claude Code skill that remembers the architectural, business and tooling
-decisions you make — across every project — and surfaces them the next time a
-similar choice comes up.
+A CLI over a decision graph that remembers the architectural, business and
+tooling decisions you make — across every project — and surfaces them the
+next time a similar choice comes up. Claude Code, Codex and Cursor can all
+reach it; see Install below for how each one gets there.
 
 You decided something two years ago, in a repo you have not opened since, for a
 reason that made sense at the time. The code still shows *what* you chose. The
@@ -35,7 +36,7 @@ $ precedent.py check --topic persistence --chose sqlite
   DIVERGENCE: you chose 'postgres' for this in 3 other projects
 ```
 
-Neither is a veto. Every rationale carries a condition, and the skill's job is to
+Neither is a veto. Every rationale carries a condition, and the agent's job is to
 ask whether it still holds: *that* rationale is about concurrent writers, so it
 says nothing about a single-user tool. Consistency is usually right and sometimes
 exactly wrong.
@@ -43,15 +44,63 @@ exactly wrong.
 ## Install
 
 Requires [`uv`](https://docs.astral.sh/uv/) and Python 3.12+. There is no install
-step — the CLI is a PEP 723 single file and `uv` fetches what it needs on first
-run, then reuses a cached environment. (A persistent virtualenv was measured and
-rejected: it saves 11 ms per call, both paths being dominated by the ~50 ms
-`grafeo` import, and costs an install step plus an environment to keep in sync.)
+step for the CLI itself — it is a PEP 723 single file and `uv` fetches what it
+needs on first run, then reuses a cached environment. (A persistent virtualenv
+was measured and rejected: it saves 11 ms per call, both paths being dominated
+by the ~50 ms `grafeo` import, and costs an install step plus an environment to
+keep in sync.) What differs by agent is how the skill, commands and hook get in
+front of it.
+
+### Claude Code plugin
+
+`adapters/claude/` is the plugin root — `SKILL.md` at its top, `commands/*.md`
+and `hooks/hooks.json` are discovered by Claude Code's own convention, nothing
+is enumerated by hand. The manifest that drives this channel is
+`adapters/claude/.claude-plugin/plugin.json`, generated from `agent-plugin.yaml`
+by `scripts/gen-plugin-json.py` (`--check` fails CI if it drifts).
+
+No marketplace catalog for this plugin is published anywhere yet — this repo
+ships no `marketplace.json`, so `/plugin install precedent` is not something a
+reader can run today. A marketplace entry that lists this plugin would point at
+the subdirectory — `{"name": "precedent", "source": "./adapters/claude"}` for a
+marketplace hosted in this repo, or a `git-subdir` source with
+`path: "adapters/claude"` from elsewhere — but a `git-subdir` source sparse-
+checks out only that named subdirectory, so it would ship the adapter
+*without* `scripts/precedent.py`, the CLI the adapter drives. A plugin install
+of this project needs the full repository checkout, not a subdirectory-only
+one; that file, and which install shape avoids the gap above, is a decision
+for whoever hosts the catalog, not something this repo settles for them.
+`claude plugin validate adapters/claude` is Anthropic's own checker and
+currently passes, with one warning (the optional `author` field is absent).
+
+### ACR (Codex and Cursor)
+
+[ACR](https://github.com/jbaruch/agentic-context-registry) is the only channel
+that reaches Codex and Cursor. It is driven by `agent-plugin.yaml`, which ships
+the skill, the CLI script and the session-start hook. ACR's v1 schema has no
+`commands` artifact class, so the 9 slash commands under Commands below cannot
+be expressed this way — Codex and Cursor users get the skill and the script,
+not the commands. Point ACR at this repo's `agent-plugin.yaml`; see ACR's own
+docs for the current install invocation.
+
+ACR's `hookArtifact` takes exactly one path per hook entry, and this manifest
+declares only `adapters/claude/hooks/session-start.sh` — a POSIX shell script.
+A second entry pointing at `session-start.ps1` was considered and rejected:
+ACR has no platform gate either, so both would fire on every OS, which is the
+exact double-hook failure mode fixed elsewhere in this README's Claude Code
+hooks section. Windows Codex/Cursor users installed via ACR get the skill and
+the script but no session-priming hook until ACR itself grows a platform
+condition.
+
+### Manual symlink
+
+What every channel above ends up doing to `~/.claude/`, done by hand — also the
+option if you would rather not add a marketplace or install ACR:
 
 ```bash
 git clone https://github.com/asm0dey/precedent ~/src/precedent
-ln -s ~/src/precedent ~/.claude/skills/precedent
-ln -s ~/src/precedent/commands/*.md ~/.claude/commands/
+ln -s ~/src/precedent/adapters/claude ~/.claude/skills/precedent
+ln -s ~/src/precedent/adapters/claude/commands/*.md ~/.claude/commands/
 ```
 
 Optionally, prime every session automatically — add to `~/.claude/settings.json`:
@@ -60,12 +109,51 @@ Optionally, prime every session automatically — add to `~/.claude/settings.jso
 {
   "hooks": {
     "SessionStart": [
-      { "hooks": [ { "type": "command",
-                     "command": "$HOME/.claude/skills/precedent/hooks/session-start.sh" } ] }
+      {
+        "matcher": "*",
+        "hooks": [
+          { "type": "command",
+            "command": "\"$HOME/.claude/skills/precedent/hooks/session-start.sh\"",
+            "shell": "bash",
+            "timeout": 20 }
+        ]
+      }
     ]
   }
 }
 ```
+
+`hooks.json` (`adapters/claude/hooks/hooks.json`, the copy of this block the
+plugin channel ships) carries the same single bash entry, for the same
+reason: Claude Code's hook schema has no per-platform field, so `shell` only
+picks which interpreter runs a given entry's `command` — it does not gate by
+OS. A second entry pointing at `session-start.ps1` would therefore be
+dispatched on every OS too, not just Windows. On macOS or Linux with `pwsh`
+installed it would run and rely on the script's own `$IsWindows` guard to
+exit quietly; on macOS or Linux *without* `pwsh` installed, there is no
+interpreter to run it at all, and the entry throws — a user-visible hook
+error every session, which defeats the entire point of a silent-by-design
+hook. Shipping only the bash entry is silent by construction on POSIX, and
+on Windows with Git Bash it still works; a Windows user without Git Bash
+simply gets no priming hook rather than an error.
+
+Windows users without Git Bash can opt in to the PowerShell hook by pasting
+a second entry into their own `~/.claude/settings.json`, pointing at
+`session-start.ps1` (`adapters/claude/hooks/session-start.ps1` in the repo —
+`$HOME/.claude/skills/precedent/hooks/session-start.ps1` if symlinked per
+this section):
+
+```json
+{ "type": "command",
+  "command": "& \"$HOME/.claude/skills/precedent/hooks/session-start.ps1\"",
+  "shell": "powershell",
+  "timeout": 20 }
+```
+
+Add it as a second element of the `"hooks"` array above. The script still
+guards itself — `if ($IsWindows -eq $false) { exit 0 }` — so it only does
+anything on real Windows, including the PowerShell 5.1 fallback Claude Code
+uses when `pwsh` 7 is not installed.
 
 The hook runs a brief for the working directory and injects it, so a session
 opens already knowing what you decided here and in comparable projects. It stays
@@ -84,6 +172,8 @@ silent where the graph has nothing to say, so quiet directories cost nothing.
 | `/precedent-diverge` | Record that this project departs from precedent, and why |
 | `/precedent-regret` | Mark a repeated choice as a mistake, inverting its precedent |
 | `/precedent-maintain` | Contradictions, tag drift, dead projects |
+
+These 9 commands are Claude Code only — see Requirements.
 
 The skill also triggers on its own — when you settle a choice, when you weigh
 options, when you start work somewhere it has not briefed you on.
@@ -155,12 +245,12 @@ separately and they never lend each other precedent, while decisions recorded at
 
 Keep it elsewhere — a synced folder, an encrypted volume, a private git
 checkout — with `init`. It moves an existing store to the new directory and
-symlinks the default path at it, so the hook and the slash commands keep working
-with no configuration:
+leaves a pointer file at the default path naming it, so the hook and the slash
+commands keep working with no configuration:
 
 ```bash
-uv run ~/.claude/skills/precedent/scripts/precedent.py init ~/Sync/precedent
-uv run ~/.claude/skills/precedent/scripts/precedent.py init   # where is it now?
+uv run ~/src/precedent/scripts/precedent.py init ~/Sync/precedent
+uv run ~/src/precedent/scripts/precedent.py init   # where is it now?
 ```
 
 Better than `PRECEDENT_HOME`, which the SessionStart hook never sees. Two
@@ -175,8 +265,21 @@ repo if you want history.
 The lock is not decoration. Two processes on one embedded graph silently lose
 writes — measured at 120 writes across 6 processes leaving 60 stored, with every
 writer reporting success ([GrafeoDB/grafeo#405](https://github.com/GrafeoDB/grafeo/issues/405),
-filed from this work). Every command takes the lock, so concurrent Claude
-sessions queue instead of clobbering.
+filed from this work). Every command takes the lock, so concurrent sessions —
+Claude Code, Codex, Cursor, or several of them at once — queue instead of
+clobbering.
+
+### A synced store is not a shared store
+
+The lock is a local file. Two machines writing to one store over Dropbox,
+iCloud or a network mount are not serialised by it — each sees its own lock
+file, and `grafeo` silently drops concurrent writes (GrafeoDB/grafeo#405:
+120 writes across 6 processes, 60 stored, nothing raised).
+
+Sync the journal, not the graph. `journal.jsonl` is append-only and merges
+in git; `precedent.py rebuild` reconstructs the graph from it on each
+machine. That is also why a project's identity is its git remote rather
+than its path — see `docs/adr/0002`.
 
 ## Measured
 
@@ -204,7 +307,8 @@ assertions and a fixture seeder if you want to re-run or extend them.
 ## Requirements
 
 - `uv` and Python 3.12+
-- Claude Code (skill, commands and hook)
+- Claude Code, Codex or Cursor — the graph, skill and CLI reach all three; the
+  9 slash commands are Claude Code only (see Install)
 - Linux, macOS or Windows
 
 ## License

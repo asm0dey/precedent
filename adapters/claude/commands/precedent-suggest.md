@@ -4,7 +4,7 @@ argument-hint: "[path, defaults to cwd]"
 ---
 
 ```bash
-uv run ~/.claude/skills/precedent/scripts/precedent.py suggest --project ${1:-.}
+uv run ~/.claude/skills/precedent/../../scripts/precedent.py suggest --project ${1:-.}
 ```
 
 Two kinds of output. Coverage gaps are topics settled in comparable projects but

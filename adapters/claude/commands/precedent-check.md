@@ -4,7 +4,7 @@ argument-hint: "<topic> [option you are leaning toward]"
 ---
 
 ```bash
-uv run ~/.claude/skills/precedent/scripts/precedent.py check --topic "$1" --chose "$2"
+uv run ~/.claude/skills/precedent/../../scripts/precedent.py check --topic "$1" --chose "$2"
 ```
 
 Lead with what it returns before offering your own opinion.

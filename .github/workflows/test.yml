@@ -1,0 +1,73 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Least privilege: nothing here writes to the repo.
+permissions:
+  contents: read
+
+# One in-flight run per branch. Superseded PR pushes are cancelled so a
+# required check reflects the head commit rather than an older one; pushes to
+# main are NOT cancelled, so main keeps an unbroken result history.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  selftest:
+    # A required check that hangs blocks every merge until someone notices.
+    # session-start.ps1 has no internal timeout and uv can stall on the
+    # network, so the job carries the bound instead.
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.0.1  # no floating major tag exists; pin exact
+      - name: selftest
+        shell: bash
+        # The value is double-quoted, which is what keeps it safe on
+        # windows-latest. Bash only strips a backslash inside double quotes
+        # when the next character is $, `, ", \ or newline — a backslash
+        # before an ordinary letter (as in a Windows path) survives quoted.
+        # The documented actions/runner footgun (a Windows path's
+        # backslashes vanishing) hits an UNQUOTED `${{ github.action_path }}`
+        # or `${{ runner.temp }}` substituted straight into the script
+        # source; it is the missing quotes that break it, not the choice of
+        # `${{ }}` over `$VAR`. Quoted, either form is fine — this uses
+        # `$RUNNER_TEMP` (a real env var) simply because it needs no `{{ }}`.
+        # The scratch `--home` is not optional either way: a default-home
+        # `selftest` would enumerate every real Project node and shell out
+        # to `git` in each one's directory (see identity_gaps() in
+        # scripts/precedent.py).
+        run: uv run scripts/precedent.py --home "${RUNNER_TEMP}/precedent-ci" selftest
+      - name: windows hook adapter runs clean
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        env:
+          PRECEDENT_HOME: ${{ runner.temp }}/precedent-hook-ci
+        # session-start.ps1 resolves the CLI relative to its own path, not an
+        # env var, so it needs no CLAUDE_PLUGIN_ROOT here. PRECEDENT_HOME
+        # points at an empty scratch store, so `brief --only-if-relevant`
+        # finds nothing to say and the script exits 0 having printed
+        # nothing — that silence is the correct, designed behaviour, not a
+        # failure, so this step only asserts the exit code.
+        run: |
+          & "${{ github.workspace }}/adapters/claude/hooks/session-start.ps1"
+          if ($LASTEXITCODE -ne 0) { throw "session-start.ps1 exited $LASTEXITCODE" }
+
+  manifest:
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.0.1  # no floating major tag exists; pin exact
+      - name: plugin.json is current
+        run: uv run scripts/gen-plugin-json.py --check
