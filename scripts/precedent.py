@@ -1428,21 +1428,24 @@ def _check_helpers() -> None:
 def _check_detect_project() -> None:
     assert detect_project(pathlib.Path("/nonexistent"))["contents"] == ""
 
-    tmp = pathlib.Path("/tmp/precedent-selftest-proj")
-    tmp.mkdir(exist_ok=True)
-    # Listing, not whitelisting: an unheard-of build file must still show up.
-    (tmp / "build.zig").write_text("// zig")
-    (tmp / "shard.yml").write_text("# crystal")
-    (tmp / "src").mkdir(exist_ok=True)
-    got = detect_project(tmp)
-    assert "build.zig" in got["contents"], got
-    assert "shard.yml" in got["contents"], got
-    assert "src/" in got["contents"], got
-    (tmp / "node_modules").mkdir(exist_ok=True)
-    assert "node_modules" not in detect_project(tmp)["contents"]
-    (tmp / "node_modules").rmdir()
-    (tmp / "build.zig").unlink(); (tmp / "shard.yml").unlink(); (tmp / "src").rmdir()
-    tmp.rmdir()
+    # tempfile, not a literal /tmp path: pathlib.Path("/tmp") is C:\tmp on
+    # Windows, which need not exist, and mkdir(parents=False) would raise
+    # FileNotFoundError before a single assertion ran. Nothing below needs a
+    # stable path, and TemporaryDirectory removes the fixture on the way out
+    # however this check ends.
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        tmp = pathlib.Path(td)
+        # Listing, not whitelisting: an unheard-of build file must still show up.
+        (tmp / "build.zig").write_text("// zig")
+        (tmp / "shard.yml").write_text("# crystal")
+        (tmp / "src").mkdir()
+        got = detect_project(tmp)
+        assert "build.zig" in got["contents"], got
+        assert "shard.yml" in got["contents"], got
+        assert "src/" in got["contents"], got
+        (tmp / "node_modules").mkdir()
+        assert "node_modules" not in detect_project(tmp)["contents"]
 
 
 def _check_drift() -> None:
@@ -1462,160 +1465,191 @@ def _check_drift() -> None:
 
 
 def _check_projects(s: Store) -> None:
+    # Every path below is a graph key and a prefix-comparison operand; none of
+    # them is ever touched on disk, so none of them needs to exist. They are
+    # built with os.sep rather than a literal "/" because that is what
+    # enclosing/contained compare with: on Windows `here.startswith(p + "\\")`
+    # is never true of a POSIX-shaped fixture, so every containment assertion
+    # below would degrade to [] and pass or fail for the wrong reason.
+    base = os.sep + os.path.join("tmp", "precedent-selftest")
+
     # Tags are a set, and overlap is what ranks precedent.
-    proj = "/tmp/precedent-selftest-tags-proj"
-    upsert_project(s, {"id": proj, "path": proj, "name": "selftest"})
-    attach_tags(s, proj, ["selftest-backend", "selftest-java"])
-    assert set(tags_of(s, proj)) == {"selftest-backend", "selftest-java"}
-    other = "/tmp/precedent-selftest-other"
-    upsert_project(s, {"id": other, "path": other, "name": "other"})
-    attach_tags(s, other, ["selftest-java"])
-    kin = neighbours(s, {"id": other, "path": other, "tags": ["selftest-java"]})
-    assert any(k["id"] == proj and k["n"] == 1 for k in kin), kin
-    kin2 = neighbours(s, {"id": other, "path": other, "tags": ["selftest-java"]},
-                      min_shared=2)
-    assert kin2 == [], "min_shared must exclude weakly-related projects"
-
-    # Containment is derived from the paths, so a monorepo needs no schema.
-    root, mod = "/tmp/precedent-selftest-root", "/tmp/precedent-selftest-root/mod"
-    sibling = "/tmp/precedent-selftest-root-elsewhere"   # prefix-similar but NOT inside
-    for pid, name in ((root, "root"), (mod, "mod"), (sibling, "elsewhere")):
-        upsert_project(s, {"id": pid, "path": pid, "name": name})
-    attach_tags(s, root, ["selftest-monorepo"])
-    attach_tags(s, mod, ["selftest-java"])
-    attach_tags(s, sibling, ["selftest-java"])
-    mod_info = {"id": mod, "path": mod}
-    root_info = {"id": root, "path": root}
-    assert [r["id"] for r in enclosing(s, mod_info)] == [root], enclosing(s, mod_info)
-    assert [r["id"] for r in contained(s, root_info)] == [mod], contained(s, root_info)
-    assert enclosing(s, {"id": sibling, "path": sibling}) == [], \
-        "a shared name prefix is not containment"
-
+    proj = base + "-tags-proj"
+    other = base + "-other"
+    root, mod = base + "-root", os.path.join(base + "-root", "mod")
+    sibling = base + "-root-elsewhere"   # prefix-similar but NOT inside
     # A project first seen on another machine keeps that machine's path as its
     # id, so `id` is not a depth and cannot order containment: len("C:\\m")
     # would sort this module ahead of the root that contains it. Ordering has
-    # to come from the local paths that actually matched.
-    win, mid = "C:\\m", root + "/mid"
-    for path in (win, mid):        # first seen on Windows, then seen here
-        upsert_project(s, {"id": win, "path": path, "name": "mid",
-                           "portable": "github.com/asm0dey/selftest-c"})
-    deep = mid + "/deep"
-    assert [r["name"] for r in enclosing(s, {"id": deep, "path": deep})] \
-        == ["root", "mid"], "outermost first, ordered by the containing local path"
-    assert effective_tags(s, {**mod_info, "tags": ["selftest-java"]}) \
-        == ["selftest-java", "selftest-monorepo"], "a module inherits enclosing tags"
-    kin3 = {r["id"] for r in neighbours(s, {**mod_info, "tags": ["selftest-java"]})}
-    assert sibling in kin3, "comparable work outside the tree must count as kin"
-    assert root not in kin3, "the enclosing project is structure, not precedent"
-    assert mod not in kin3, "a project is not its own kin"
-    for pid in (proj, other, root, mod, sibling, win):
-        s.q("MATCH (p:Project {id:$id}) DETACH DELETE p", {"id": pid})
-    for t in ("selftest-monorepo", "selftest-backend", "selftest-java"):
-        s.q("""MATCH (n:Tag {name:$n}) WHERE NOT EXISTS { MATCH (n)<--() }
-                 DETACH DELETE n""", {"n": t})
+    # to come from the local paths that actually matched. On Windows this is a
+    # short local path rather than a foreign one, which tests the same thing —
+    # a four-character id must not sort ahead of the root that contains the
+    # module.
+    win, mid = "C:\\m", os.path.join(root, "mid")
+    try:
+        upsert_project(s, {"id": proj, "path": proj, "name": "selftest"})
+        attach_tags(s, proj, ["selftest-backend", "selftest-java"])
+        assert set(tags_of(s, proj)) == {"selftest-backend", "selftest-java"}
+        upsert_project(s, {"id": other, "path": other, "name": "other"})
+        attach_tags(s, other, ["selftest-java"])
+        kin = neighbours(s, {"id": other, "path": other, "tags": ["selftest-java"]})
+        assert any(k["id"] == proj and k["n"] == 1 for k in kin), kin
+        kin2 = neighbours(s, {"id": other, "path": other, "tags": ["selftest-java"]},
+                          min_shared=2)
+        assert kin2 == [], "min_shared must exclude weakly-related projects"
+
+        # Containment is derived from the paths, so a monorepo needs no schema.
+        for pid, name in ((root, "root"), (mod, "mod"), (sibling, "elsewhere")):
+            upsert_project(s, {"id": pid, "path": pid, "name": name})
+        attach_tags(s, root, ["selftest-monorepo"])
+        attach_tags(s, mod, ["selftest-java"])
+        attach_tags(s, sibling, ["selftest-java"])
+        mod_info = {"id": mod, "path": mod}
+        root_info = {"id": root, "path": root}
+        assert [r["id"] for r in enclosing(s, mod_info)] == [root], enclosing(s, mod_info)
+        assert [r["id"] for r in contained(s, root_info)] == [mod], contained(s, root_info)
+        assert enclosing(s, {"id": sibling, "path": sibling}) == [], \
+            "a shared name prefix is not containment"
+
+        for path in (win, mid):    # first seen on Windows, then seen here
+            upsert_project(s, {"id": win, "path": path, "name": "mid",
+                               "portable": "github.com/asm0dey/selftest-c"})
+        deep = os.path.join(mid, "deep")
+        assert [r["name"] for r in enclosing(s, {"id": deep, "path": deep})] \
+            == ["root", "mid"], "outermost first, ordered by the containing local path"
+        assert effective_tags(s, {**mod_info, "tags": ["selftest-java"]}) \
+            == ["selftest-java", "selftest-monorepo"], "a module inherits enclosing tags"
+        kin3 = {r["id"] for r in neighbours(s, {**mod_info, "tags": ["selftest-java"]})}
+        assert sibling in kin3, "comparable work outside the tree must count as kin"
+        assert root not in kin3, "the enclosing project is structure, not precedent"
+        assert mod not in kin3, "a project is not its own kin"
+    finally:
+        # Every other check in this file cleans up in a finally, and this one
+        # must too: a failing assertion above used to leak six Project nodes,
+        # and the NEXT run then tripped the node-count invariant in
+        # cmd_selftest — an error naming a check that was never at fault.
+        for pid in (proj, other, root, mod, sibling, win):
+            s.q("MATCH (p:Project {id:$id}) DETACH DELETE p", {"id": pid})
+        for t in ("selftest-monorepo", "selftest-backend", "selftest-java"):
+            s.q("""MATCH (n:Tag {name:$n}) WHERE NOT EXISTS { MATCH (n)<--() }
+                     DETACH DELETE n""", {"n": t})
 
 
 def _check_decisions(s: Store) -> None:
-    tmp = pathlib.Path("/tmp/precedent-selftest-proj")
-    tmp.mkdir(exist_ok=True)
+    # A real directory, from tempfile rather than a literal /tmp path, because
+    # worth_backfilling stats it for a .git and Windows has no /tmp to mkdir
+    # into. The graph fixtures key off whatever path it lands on.
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        tmp = pathlib.Path(td)
+        s.q("MATCH (n) WHERE n.id STARTS WITH 'selftest' DETACH DELETE n")
+        d = {"id": "selftest-1", "title": "T", "statement": "T", "rationale": "r",
+             "scope": "architecture", "created": today(),
+             "project_id": str(tmp), "project_name": "selftest",
+             "tags": ["selftest-backend", "selftest-java"],
+             "topics": ["persistence"], "chose": ["postgres"],
+             "rejected": ["mongo"], "supersedes": []}
+        write_decision(s, d)
+        assert s.q("""MATCH (:Decision {id:'selftest-1'})-[:CHOSE]->(o:Option)
+                      RETURN o.name AS n""") == [{"n": "postgres"}]
+        assert s.q("""MATCH (:Decision {id:'selftest-1'})-[:REJECTED]->(o:Option)
+                      RETURN o.name AS n""") == [{"n": "mongo"}]
 
-    s.q("MATCH (n) WHERE n.id STARTS WITH 'selftest' DETACH DELETE n")
-    d = {"id": "selftest-1", "title": "T", "statement": "T", "rationale": "r",
-         "scope": "architecture", "created": today(),
-         "project_id": str(tmp), "project_name": "selftest",
-         "tags": ["selftest-backend", "selftest-java"],
-         "topics": ["persistence"], "chose": ["postgres"],
-         "rejected": ["mongo"], "supersedes": []}
-    write_decision(s, d)
-    assert s.q("""MATCH (:Decision {id:'selftest-1'})-[:CHOSE]->(o:Option)
-                  RETURN o.name AS n""") == [{"n": "postgres"}]
-    assert s.q("""MATCH (:Decision {id:'selftest-1'})-[:REJECTED]->(o:Option)
-                  RETURN o.name AS n""") == [{"n": "mongo"}]
+        # The backfill nudge fires in a repo the graph has never seen, and nowhere
+        # else — a bare directory is not a project worth prompting about.
+        # Shaped like a real info dict, id and all: worth_backfilling reads only
+        # `path`, but a fixture missing `id` is a template for a KeyError the next
+        # time one of these is passed to a containment helper.
+        proj_info = {"id": str(tmp), "path": str(tmp)}
+        assert not worth_backfilling(s, proj_info), "a non-repo must not be nudged"
+        (tmp / ".git").mkdir(exist_ok=True)
+        assert worth_backfilling(s, proj_info), "a repo with a populated graph must be"
+        (tmp / ".git").rmdir()
 
-    # The backfill nudge fires in a repo the graph has never seen, and nowhere
-    # else — a bare directory is not a project worth prompting about.
-    # Shaped like a real info dict, id and all: worth_backfilling reads only
-    # `path`, but a fixture missing `id` is a template for a KeyError the next
-    # time one of these is passed to a containment helper.
-    proj_info = {"id": str(tmp), "path": str(tmp)}
-    assert not worth_backfilling(s, proj_info), "a non-repo must not be nudged"
-    (tmp / ".git").mkdir(exist_ok=True)
-    assert worth_backfilling(s, proj_info), "a repo with a populated graph must be"
-    (tmp / ".git").rmdir()
+        d2 = {**d, "id": "selftest-2", "chose": ["sqlite"], "supersedes": ["selftest-1"]}
+        write_decision(s, d2)
+        assert s.q("MATCH (d:Decision {id:'selftest-1'}) RETURN d.status AS s") \
+            == [{"s": "superseded"}], "supersede must flip the old decision's status"
 
-    d2 = {**d, "id": "selftest-2", "chose": ["sqlite"], "supersedes": ["selftest-1"]}
-    write_decision(s, d2)
-    assert s.q("MATCH (d:Decision {id:'selftest-1'}) RETURN d.status AS s") \
-        == [{"s": "superseded"}], "supersede must flip the old decision's status"
+        # A knowing exception is recorded on the decision, so the warning can be
+        # answered once rather than repeated forever.
+        d3 = {**d, "id": "selftest-3", "chose": ["sqlite"], "supersedes": [],
+              "despite": "selftest reason", "diverges_from": ["selftest-1"]}
+        write_decision(s, d3)
+        assert s.q("MATCH (d:Decision {id:'selftest-3'}) RETURN d.despite AS w") \
+            == [{"w": "selftest reason"}]
+        assert s.q("""MATCH (:Decision {id:'selftest-3'})-[:DIVERGES_FROM]->(o:Decision)
+                      RETURN o.id AS id""") == [{"id": "selftest-1"}]
 
-    # A knowing exception is recorded on the decision, so the warning can be
-    # answered once rather than repeated forever.
-    d3 = {**d, "id": "selftest-3", "chose": ["sqlite"], "supersedes": [],
-          "despite": "selftest reason", "diverges_from": ["selftest-1"]}
-    write_decision(s, d3)
-    assert s.q("MATCH (d:Decision {id:'selftest-3'}) RETURN d.despite AS w") \
-        == [{"w": "selftest reason"}]
-    assert s.q("""MATCH (:Decision {id:'selftest-3'})-[:DIVERGES_FROM]->(o:Decision)
-                  RETURN o.id AS id""") == [{"id": "selftest-1"}]
+        # A regret must invert precedent, not erase it: the decision survives with
+        # its rationale, but stops counting as a norm.
+        apply_regret(s, {"id": "selftest-lesson", "topic": "persistence",
+                         "option": "postgres", "because": "selftest lesson",
+                         "instead": "sqlite", "decisions": ["selftest-2"],
+                         "created": today()})
+        assert s.q("MATCH (d:Decision {id:'selftest-2'}) RETURN d.status AS s") \
+            == [{"s": "regretted"}], "regret must mark the decision, not delete it"
+        assert s.q("""MATCH (:Lesson {id:'selftest-lesson'})-[:REGRETS]->(d:Decision)
+                      RETURN d.id AS id""") == [{"id": "selftest-2"}]
+        assert s.q("""MATCH (d:Decision {id:'selftest-2'})-[:CHOSE]->(o:Option)
+                      RETURN o.name AS n""") == [{"n": "sqlite"}], \
+            "the original choice and its rationale must survive a regret"
+        s.q("MATCH (l:Lesson {id:'selftest-lesson'}) DETACH DELETE l")
 
-    # A regret must invert precedent, not erase it: the decision survives with
-    # its rationale, but stops counting as a norm.
-    apply_regret(s, {"id": "selftest-lesson", "topic": "persistence",
-                     "option": "postgres", "because": "selftest lesson",
-                     "instead": "sqlite", "decisions": ["selftest-2"],
-                     "created": today()})
-    assert s.q("MATCH (d:Decision {id:'selftest-2'}) RETURN d.status AS s") \
-        == [{"s": "regretted"}], "regret must mark the decision, not delete it"
-    assert s.q("""MATCH (:Lesson {id:'selftest-lesson'})-[:REGRETS]->(d:Decision)
-                  RETURN d.id AS id""") == [{"id": "selftest-2"}]
-    assert s.q("""MATCH (d:Decision {id:'selftest-2'})-[:CHOSE]->(o:Option)
-                  RETURN o.name AS n""") == [{"n": "sqlite"}], \
-        "the original choice and its rationale must survive a regret"
-    s.q("MATCH (l:Lesson {id:'selftest-lesson'}) DETACH DELETE l")
-
-    s.q("MATCH (n) WHERE n.id STARTS WITH 'selftest' DETACH DELETE n")
-    s.q("MATCH (p:Project {id:$id}) DETACH DELETE p", {"id": str(tmp)})
-    for name in ("persistence", "postgres", "mongo", "sqlite",
-                 "selftest-backend", "selftest-java"):
-        s.q("""MATCH (n) WHERE (n:Topic OR n:Option OR n:Tag) AND n.name = $name
-                 AND NOT EXISTS { MATCH (n)<--() } DETACH DELETE n""", {"name": name})
-    tmp.rmdir()
+        s.q("MATCH (n) WHERE n.id STARTS WITH 'selftest' DETACH DELETE n")
+        s.q("MATCH (p:Project {id:$id}) DETACH DELETE p", {"id": str(tmp)})
+        for name in ("persistence", "postgres", "mongo", "sqlite",
+                     "selftest-backend", "selftest-java"):
+            s.q("""MATCH (n) WHERE (n:Topic OR n:Option OR n:Tag) AND n.name = $name
+                     AND NOT EXISTS { MATCH (n)<--() } DETACH DELETE n""", {"name": name})
 
 
 def _check_relocate() -> None:
     # Relocation moves the only copy of the journal, so every branch is checked.
+    # tempfile, not a literal /tmp path, so this runs where there is no /tmp.
+    # `base` is a directory INSIDE the temporary one because the blocks below
+    # rmtree it between cases, and removing the directory TemporaryDirectory
+    # is holding would make its own cleanup raise.
     import shutil as _sh
-    base = pathlib.Path("/tmp/precedent-selftest-home")
-    _sh.rmtree(base, ignore_errors=True)
-    dflt, tgt = base / "default", base / "elsewhere"
-    relocate(tgt, dflt)
-    assert (dflt / POINTER).read_text().strip() == str(tgt), "fresh default must get a pointer"
-
-    _sh.rmtree(base); dflt.mkdir(parents=True)
-    (dflt / "journal.jsonl").write_text("x\n"); (dflt / ".lock").write_text("")
-    relocate(tgt, dflt)
-    assert (tgt / "journal.jsonl").read_text() == "x\n", "an existing store must move, not vanish"
-
-    _sh.rmtree(base); dflt.mkdir(parents=True); tgt.mkdir(parents=True)
-    (dflt / "journal.jsonl").write_text("a\n"); (tgt / "journal.jsonl").write_text("b\n")
-    try:
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        base = pathlib.Path(td) / "home"
+        dflt, tgt = base / "default", base / "elsewhere"
         relocate(tgt, dflt)
-        raise AssertionError("two populated stores must not be merged silently")
-    except SystemExit:
-        pass
-    assert (dflt / "journal.jsonl").read_text() == "a\n"
-    _sh.rmtree(base)
+        assert (dflt / POINTER).read_text().strip() == str(tgt), \
+            "fresh default must get a pointer"
+
+        _sh.rmtree(base); dflt.mkdir(parents=True)
+        (dflt / "journal.jsonl").write_text("x\n"); (dflt / ".lock").write_text("")
+        relocate(tgt, dflt)
+        assert (tgt / "journal.jsonl").read_text() == "x\n", \
+            "an existing store must move, not vanish"
+        # The .lock prefix filter exists so the lock stays with the path
+        # processes still queue on. A moved lock file is how relocation
+        # strands a store, so assert it stayed rather than only exercising it.
+        assert not (tgt / ".lock").exists(), \
+            "the lock file must not travel with the payload"
+        assert (dflt / ".lock").exists(), "the lock file must stay at the old path"
+
+        _sh.rmtree(base); dflt.mkdir(parents=True); tgt.mkdir(parents=True)
+        (dflt / "journal.jsonl").write_text("a\n"); (tgt / "journal.jsonl").write_text("b\n")
+        try:
+            relocate(tgt, dflt)
+            raise AssertionError("two populated stores must not be merged silently")
+        except SystemExit:
+            pass
+        assert (dflt / "journal.jsonl").read_text() == "a\n"
+        _sh.rmtree(base)
 
 
 def _check_export(s: Store) -> None:
     # The export layout is what the server reads; if save() or the directory
     # shape changes, the UI shows an empty graph and says nothing.
-    import shutil as _sh
-    exp = pathlib.Path("/tmp/precedent-selftest-export")
-    _sh.rmtree(exp, ignore_errors=True)
-    export_to(s, exp)
-    assert (exp / "default" / "data.grafeo").stat().st_size > 0, "export wrote nothing"
-    _sh.rmtree(exp)
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        exp = pathlib.Path(td) / "export"
+        export_to(s, exp)
+        assert (exp / "default" / "data.grafeo").stat().st_size > 0, "export wrote nothing"
 
 
 def _check_store(s: Store) -> None:
@@ -2222,11 +2256,25 @@ def _check_maintain(s: Store) -> None:
         # "The directory is not here" was never evidence a project is dead. It is
         # equally consistent with an unmounted drive, another checkout, or a
         # machine you are not sitting at — and dead projects get discounted.
-        assert liveness({"id": "/tmp", "paths": "/tmp"}) == "live"
-        assert liveness({"id": "C:\\dev\\x", "paths": "C:\\dev\\x"}) == "elsewhere"
-        assert liveness({"id": "/tmp", "paths": "/nope/x\n/tmp"}) == "live", \
-            "live if ANY known path exists"
-        assert liveness({"id": "/nope/x", "paths": "/nope/x"}) == "gone"
+        #
+        # Each fixture is shaped for the platform running the check, because
+        # liveness answers relative to os.sep and a literal would encode one
+        # platform's answer as if it were the rule. `foreign` is a path shaped
+        # for the OTHER platform whichever one this is — on POSIX a Windows
+        # drive path, on Windows a POSIX absolute path — and `dead` is a
+        # native-shaped path that does not exist, which is the only shape that
+        # can legitimately read as `gone`.
+        import tempfile
+        absent = "nonexistent-precedent-selftest"
+        foreign = f"C:\\{absent}\\x" if os.sep == "/" else f"/{absent}/x"
+        dead = os.path.join(os.sep + absent, "x")
+        with tempfile.TemporaryDirectory() as live:
+            assert liveness({"id": live, "paths": live}) == "live"
+            assert liveness({"id": live, "paths": f"{dead}\n{live}"}) == "live", \
+                "live if ANY known path exists"
+        assert liveness({"id": foreign, "paths": foreign}) == "elsewhere", \
+            "a path shaped for another platform is unknown, not dead"
+        assert liveness({"id": dead, "paths": dead}) == "gone"
     finally:
         s.q("MATCH (n) WHERE n.id STARTS WITH 'selftest-m' DETACH DELETE n")
         s.q("MATCH (p:Project {id:'/tmp/precedent-selftest-m'}) DETACH DELETE p")
