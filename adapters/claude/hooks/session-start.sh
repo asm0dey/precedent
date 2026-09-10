@@ -32,11 +32,20 @@ BRIEF=$(timeout 20 uv run --quiet "$DG" brief --project "$PWD" --only-if-relevan
 # other adapter cannot drift apart.
 ORDERS=$(uv run --quiet "$DG" standing-orders 2>/dev/null) || exit 0
 
+# The guidance pointer needs the same two-layout treatment as the CLI above:
+# in the repository the main skill is a sibling directory, while acr realize
+# writes it under the agent's skills root beside this hook's own directory.
+SKILL=""
+for candidate in "$HERE/../skills/precedent/SKILL.md" \
+                 "$HERE"/../../skills/*precedent/SKILL.md; do
+  [ -f "$candidate" ] && { SKILL="$candidate"; break; }
+done
+
 cat <<PRIME
 PRECEDENT — your recorded decisions, loaded for this session.
 
 $BRIEF
 
 $ORDERS
-Full guidance: $HERE/../SKILL.md
+${SKILL:+Full guidance: $SKILL}
 PRIME

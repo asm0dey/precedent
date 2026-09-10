@@ -100,14 +100,14 @@ Requires [`uv`](https://docs.astral.sh/uv/) and Python 3.12+. The CLI itself has
 step: it is a PEP 723 single file, and `uv` fetches what it needs on first run, then reuses
 a cached environment. (A persistent virtualenv was measured and rejected. It saves 11 ms
 per call, both paths being dominated by the ~50 ms `grafeo` import, and costs an install
-step plus an environment to keep in sync.) What differs by agent is how the skill, commands
-and hook get in front of it.
+step plus an environment to keep in sync.) What differs by agent is how the skills and the
+hook get in front of it.
 
 ### Claude Code plugin
 
-`adapters/claude/` is the plugin root, with `SKILL.md` at its top. `commands/*.md` and
-`hooks/hooks.json` are discovered by Claude Code's own convention, so nothing is enumerated
-by hand. The manifest that drives this channel is
+`adapters/claude/` is the plugin root. `skills/*/SKILL.md` and `hooks/hooks.json` are
+discovered by Claude Code's own convention, so nothing is enumerated by hand. The
+manifest that drives this channel is
 `adapters/claude/.claude-plugin/plugin.json`, generated from `agent-plugin.yaml` by
 `scripts/gen-plugin-json.py` (`--check` fails CI if it drifts).
 
@@ -126,31 +126,23 @@ is absent).
 ### ACR (Codex and Cursor)
 
 [ACR](https://github.com/jbaruch/agentic-context-registry) is the only channel that reaches
-Codex and Cursor. It is driven by `agent-plugin.yaml`, which ships the skill, the CLI script
-and the session-start hook:
+Codex and Cursor. It is driven by `agent-plugin.yaml`, which ships the ten skills, the CLI
+script and the session-start hook:
 
 ```bash
 acr install github:asm0dey/precedent --agent claude-code   # or codex, or cursor
 acr realize
 ```
 
-`install` resolves the latest GitHub release, so a release has to exist. The skill artifact
-is the `adapters/claude` directory, which is also the plugin root the Claude Code channel
-uses, so the whole adapter travels: `SKILL.md`, `hooks/` and `commands/`.
+`install` resolves the latest GitHub release, so a release has to exist. Each of the ten
+skills is its own artifact, and `realize` writes them into the agent's own skills directory:
+`.claude/skills/`, `.codex/skills/` or `.cursor/skills/` as appropriate.
 
-The commands ride along as files without being wired up. ACR's v1 schema has no `commands`
-artifact class, and `realize` puts the skill under
-`.claude/skills/acr__asm0dey__precedent__precedent/`, so the 9 command files land at
-`commands/` *inside that skill directory*, where Claude Code does not look for them. Codex
-and Cursor users get the skill, the CLI and the hook; the slash commands stay a Claude Code
-plugin feature until ACR grows an artifact class for them.
-
-ACR's `hookArtifact` takes exactly one path per hook entry, and this manifest declares only
-`adapters/claude/hooks/session-start.sh`, a POSIX shell script. A second entry pointing at
-`session-start.ps1` was considered and rejected: ACR has no platform gate either, so both
-would fire on every OS, which is the double-hook failure mode described in the next section.
-Windows Codex and Cursor users installed via ACR get the skill and the script, with no
-session-priming hook until ACR itself grows a platform condition.
+All three agents read those paths, so every skill works on every agent. The realized
+directories carry an ACR prefix (`acr__asm0dey__precedent__precedent-check`), which matters
+only if you type the name: skills fire from their descriptions, and that is how they are
+meant to fire. Codex registers them under their frontmatter name regardless, so `$precedent-check`
+works there.
 
 ### Manual symlink
 
@@ -159,8 +151,7 @@ would rather not add a marketplace or install ACR:
 
 ```bash
 git clone https://github.com/asm0dey/precedent ~/src/precedent
-ln -s ~/src/precedent/adapters/claude ~/.claude/skills/precedent
-ln -s ~/src/precedent/adapters/claude/commands/*.md ~/.claude/commands/
+ln -s ~/src/precedent/adapters/claude/skills/* ~/.claude/skills/
 ```
 
 Optionally, prime every session automatically by adding this to `~/.claude/settings.json`:
@@ -214,24 +205,28 @@ The hook runs a brief for the working directory and injects it, so a session ope
 knowing what you decided here and in comparable projects. It stays quiet where the graph has
 nothing to say, so empty directories cost nothing.
 
-## Commands
+## The skills
 
-| Command | Does |
+`precedent` carries the judgment: what is worth recording, how to read a verdict, when
+consistency is wrong. Nine task skills cover the daily paths.
+
+| Skill | Does |
 |---|---|
-| `/precedent-prime` | Load this project's decisions and precedent into context |
-| `/precedent-record` | Record a decision that was just settled |
-| `/precedent-check <topic> [option]` | Prior decisions on a topic, plus a conflict verdict |
-| `/precedent-tag [tags]` | Show or set this project's tags |
-| `/precedent-analyze` | Read an existing project and record the decisions visible in it |
-| `/precedent-suggest` | Decisions this project still owes |
-| `/precedent-diverge` | Record that this project departs from precedent, and why |
-| `/precedent-regret` | Mark a repeated choice as a mistake, inverting its precedent |
-| `/precedent-maintain` | Contradictions, tag drift, dead projects |
+| `precedent-prime` | Load this project's decisions and precedent into context |
+| `precedent-record` | Record a decision that was just settled |
+| `precedent-check` | Prior decisions on a topic, plus a conflict verdict |
+| `precedent-tag` | Show or set this project's tags |
+| `precedent-analyze` | Read an existing project and record the decisions visible in it |
+| `precedent-suggest` | Decisions this project still owes |
+| `precedent-diverge` | Record that this project departs from precedent, and why |
+| `precedent-regret` | Mark a repeated choice as a mistake, inverting its precedent |
+| `precedent-maintain` | Contradictions, tag drift, dead projects |
 
-These 9 commands are Claude Code only; see Requirements.
+Each fires on its own description, so nothing has to be typed. Claude Code also takes them
+as slash commands, Codex with a `$` prefix, Cursor from the slash menu.
 
-The skill also triggers on its own: when you settle a choice, when you weigh options, when
-you start work somewhere it has not briefed you on.
+The main skill triggers on its own too — when you settle a choice, when you weigh options,
+when you start work somewhere it has not briefed you on.
 
 ## When precedent does not simply apply
 
@@ -299,8 +294,7 @@ resolves to the same node; the local path stays as an alias. See `docs/adr/0002`
 
 Keep it elsewhere (a synced folder, an encrypted volume, a private git checkout) with
 `init`. It moves an existing store to the new directory and leaves a pointer file at the
-default path naming it, so the hook and the slash commands keep working with no
-configuration:
+default path naming it, so the hook and every skill keep working with no configuration:
 
 ```bash
 uv run ~/src/precedent/scripts/precedent.py init ~/Sync/precedent
@@ -366,8 +360,7 @@ holds the prompts, assertions and a fixture seeder if you want to re-run or exte
 ## Requirements
 
 - `uv` and Python 3.12+
-- Claude Code, Codex or Cursor. The graph, skill and CLI reach all three; the 9 slash
-  commands are Claude Code only (see Install)
+- Claude Code, Codex or Cursor. The graph, the ten skills and the CLI reach all three
 - Linux, macOS or Windows
 
 ## License

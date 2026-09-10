@@ -42,7 +42,14 @@ if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($brief)) { exit 0 }
 $orders = (& uv run --quiet $dg standing-orders 2>$null) -join "`n"
 if ($LASTEXITCODE -ne 0) { exit 0 }
 
-$skill = Join-Path $here '..\SKILL.md'
+# Same two layouts as the CLI lookup above: a sibling skills directory in the
+# repository, or the agent's own skills root when acr realize placed it.
+$skillCandidates = @(Join-Path $here '..\skills\precedent\SKILL.md')
+$skillCandidates += Get-ChildItem -Path (Join-Path $here '..\..\skills') -Directory `
+    -Filter '*precedent' -ErrorAction SilentlyContinue | ForEach-Object {
+        Join-Path $_.FullName 'SKILL.md'
+    }
+$skill = $skillCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
 @"
 PRECEDENT — your recorded decisions, loaded for this session.
 

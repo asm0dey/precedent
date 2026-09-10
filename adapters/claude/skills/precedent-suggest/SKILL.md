@@ -1,11 +1,16 @@
 ---
-description: List decisions this project still owes, based on comparable projects
-argument-hint: "[path, defaults to cwd]"
+name: precedent-suggest
+description: List decisions this project still owes, based on comparable projects. Use when the user asks what is left to decide, what they have missed, or how this project compares with their others.
 ---
 
+# Decisions this project still owes
+
 ```bash
-uv run ~/.claude/skills/precedent/../../scripts/precedent.py suggest --project ${1:-.}
+uv run <cli> suggest --project <path>
 ```
+
+`<cli>` is this package's `precedent.py`; the `precedent` skill says how to
+locate it. The path defaults to the working directory.
 
 Two kinds of output. Coverage gaps are topics settled in comparable projects but
 open here — decisions owed, not yet made. Principle candidates are the same

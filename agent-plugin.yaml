@@ -9,7 +9,25 @@ source:
 artifacts:
   skills:
     - id: precedent
-      path: adapters/claude
+      path: adapters/claude/skills/precedent
+    - id: precedent-analyze
+      path: adapters/claude/skills/precedent-analyze
+    - id: precedent-check
+      path: adapters/claude/skills/precedent-check
+    - id: precedent-diverge
+      path: adapters/claude/skills/precedent-diverge
+    - id: precedent-maintain
+      path: adapters/claude/skills/precedent-maintain
+    - id: precedent-prime
+      path: adapters/claude/skills/precedent-prime
+    - id: precedent-record
+      path: adapters/claude/skills/precedent-record
+    - id: precedent-regret
+      path: adapters/claude/skills/precedent-regret
+    - id: precedent-suggest
+      path: adapters/claude/skills/precedent-suggest
+    - id: precedent-tag
+      path: adapters/claude/skills/precedent-tag
   scripts:
     - id: precedent-cli
       path: scripts/precedent.py
