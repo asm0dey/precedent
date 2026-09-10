@@ -471,9 +471,9 @@ diffs and belongs in a private git repo if the user wants history.
 
 The lock is not decoration. Two processes on one embedded graph silently lose
 writes — measured at 120 writes across 6 processes leaving 60 stored, with every
-writer reporting success. Every command takes the lock, so concurrent Claude
-sessions queue instead of clobbering. Never bypass the script to open the graph
-directly.
+writer reporting success. Every command takes the lock, so concurrent
+sessions — Claude Code, Codex, Cursor, or several of them at once — queue
+instead of clobbering. Never bypass the script to open the graph directly.
 
 ```bash
 uv run <skill>/scripts/precedent.py rebuild    # replay journal into a fresh graph

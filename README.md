@@ -131,6 +131,8 @@ silent where the graph has nothing to say, so quiet directories cost nothing.
 | `/precedent-regret` | Mark a repeated choice as a mistake, inverting its precedent |
 | `/precedent-maintain` | Contradictions, tag drift, dead projects |
 
+These 9 commands are Claude Code only — see Requirements.
+
 The skill also triggers on its own — when you settle a choice, when you weigh
 options, when you start work somewhere it has not briefed you on.
 
