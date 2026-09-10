@@ -994,6 +994,31 @@ def cmd_cypher(a, s: Store) -> None:
         print(row)
 
 
+def export_to(s: Store, out: pathlib.Path) -> pathlib.Path:
+    """Write the graph where grafeo-server can read it.
+
+    The live store is WAL-only: graph.db holds a wal/ directory and no
+    data.grafeo, so a server pointed straight at it reports an empty database
+    and helpfully creates a second, real one next to yours. save() materialises
+    the file, under the <data-dir>/<name>/ layout the server looks for.
+    """
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "default").mkdir(exist_ok=True)
+    s.db.save(str(out / "default" / "data.grafeo"))
+    return out
+
+
+def cmd_export(a, s: Store) -> None:
+    out = export_to(s, pathlib.Path(a.out or pathlib.Path(a.home) / "export").expanduser().resolve())
+    user = "" if os.name == "nt" else " --user $(id -u):$(id -g)"
+    print(f"exported: {out}")
+    print("serve it read-only — two writers on one embedded db silently drop writes:")
+    print(f"  docker run --rm -p 7474:7474{user} \\")
+    print(f"    -v {out}:/data grafeo/grafeo-server:latest --data-dir /data --read-only")
+    print("  then open http://localhost:7474")
+    print("re-run this after recording, the snapshot is a copy and does not follow the store")
+
+
 def cmd_selftest(a, s: Store) -> None:
     """One runnable check over the paths that contain real logic."""
     assert slug("Use Postgres, not Mongo!") == "use-postgres-not-mongo"
@@ -1151,6 +1176,14 @@ def cmd_selftest(a, s: Store) -> None:
     assert (dflt / "journal.jsonl").read_text() == "a\n"
     _sh.rmtree(base)
 
+    # The export layout is what the server reads; if save() or the directory
+    # shape changes, the UI shows an empty graph and says nothing.
+    exp = pathlib.Path("/tmp/precedent-selftest-export")
+    _sh.rmtree(exp, ignore_errors=True)
+    export_to(s, exp)
+    assert (exp / "default" / "data.grafeo").stat().st_size > 0, "export wrote nothing"
+    _sh.rmtree(exp)
+
     after = s.q("MATCH (n) RETURN count(n) AS n")[0]["n"]
     assert after == before, f"selftest changed node count {before} -> {after}"
     print(f"selftest ok ({before} nodes, unchanged)")
@@ -1244,6 +1277,10 @@ def main(argv=None) -> int:
     cy.add_argument("query")
     cy.add_argument("--params", default="")
     cy.set_defaults(fn=cmd_cypher)
+
+    ex = sub.add_parser("export", help="snapshot the graph for grafeo-server and its web UI")
+    ex.add_argument("--out", help="where to write the snapshot (default: <store>/export)")
+    ex.set_defaults(fn=cmd_export)
 
     sub.add_parser("selftest").set_defaults(fn=cmd_selftest)
 
