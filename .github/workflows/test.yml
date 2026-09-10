@@ -33,6 +33,20 @@ jobs:
         # to `git` in each one's directory (see identity_gaps() in
         # scripts/precedent.py).
         run: uv run scripts/precedent.py --home "${RUNNER_TEMP}/precedent-ci" selftest
+      - name: windows hook adapter runs clean
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        env:
+          PRECEDENT_HOME: ${{ runner.temp }}/precedent-hook-ci
+        # session-start.ps1 resolves the CLI relative to its own path, not an
+        # env var, so it needs no CLAUDE_PLUGIN_ROOT here. PRECEDENT_HOME
+        # points at an empty scratch store, so `brief --only-if-relevant`
+        # finds nothing to say and the script exits 0 having printed
+        # nothing — that silence is the correct, designed behaviour, not a
+        # failure, so this step only asserts the exit code.
+        run: |
+          & "${{ github.workspace }}/adapters/claude/hooks/session-start.ps1"
+          if ($LASTEXITCODE -ne 0) { throw "session-start.ps1 exited $LASTEXITCODE" }
 
   manifest:
     runs-on: ubuntu-latest
