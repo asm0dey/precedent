@@ -8,7 +8,7 @@ Read this before writing ad-hoc Cypher via `precedent.py cypher`. The engine is 
 | Label | Key | Properties |
 |---|---|---|
 | `Decision` | `id` | `title`, `statement`, `rationale`, `scope`, `status`, `created`, `despite` |
-| `Project` | `id` (absolute path) | `name`, `seen` |
+| `Project` | `id` (native path of first sighting) | `name`, `seen`, `portable`, `paths` |
 | `Tag` | `name` | — |
 | `Topic` | `name` (lowercased) | — |
 | `Option` | `name` | — |
@@ -68,17 +68,36 @@ ORDER BY n DESC
 
 then decisions are read from the projects that scored above `--min-shared`.
 
+## Identity
+
+`Project.portable` is the identity: the git remote reduced to `host/owner/repo`,
+plus a `#/subpath` for a module inside it. `Project.id` is only the native path
+this project was first seen at, and stays the graph key — every query that
+matches a node matches on `id`.
+
+`Project.paths` is every native path the project has been seen at, one per line
+(a string, not a list property). Both reads and writes resolve `portable` to an
+existing `id` before touching a node, so one repository checked out on two
+machines is one Project rather than two with no shared precedent. A repo with no
+remote has no `portable` and behaves exactly as it did before. See
+`docs/adr/0002`.
+
 ## Containment
 
-`Project.id` is an absolute path, so a monorepo root is a string prefix of its
-modules and containment needs no stored edge — it is derived, always accurate,
-and never needs maintaining. Comparison is path-boundary aware: `/repo-elsewhere`
-is not inside `/repo`.
+Containment is derived from paths, so a monorepo root is a string prefix of its
+modules and needs no stored edge — always accurate, never maintained. It is
+derived from `paths`, not from `id`: `id` may be a path recorded on another
+machine, and comparing this machine's directory against a Windows key would
+silently report no containment. Comparison is path-boundary aware:
+`/repo-elsewhere` is not inside `/repo`.
 
-- `enclosing(s, id)` — projects containing this one, outermost first.
-- `contained(s, id)` — modules inside this one.
+The three helpers take the info dict from `project_info`, whose `id` is the
+graph key and whose `path` is this machine's directory:
+
+- `enclosing(s, info)` — projects containing this one, outermost first.
+- `contained(s, info)` — modules inside this one.
 - `effective_tags(s, info)` — own tags plus every enclosing project's tags.
-- `same_tree(s, id)` — self, ancestors and descendants; excluded from precedent
+- `same_tree(s, info)` — self, ancestors and descendants; excluded from precedent
   because they are one codebase rather than comparable work.
 
 Decisions recorded on an enclosing project surface in a module's `brief` as
@@ -110,9 +129,15 @@ JSON object per line, appended and fsync'd before the graph is touched.
 {"ts":"2026-09-10T14:02:11","op":"record","id":"postgres-for-state-1789...",
  "title":"...","statement":"...","rationale":"...","scope":"architecture",
  "created":"2026-09-10","project_id":"/home/u/proj","project_name":"proj",
+ "project_path":"/home/u/proj","portable":"github.com/u/proj",
  "project_type":"telegram-bot","stack":"aiogram","topics":["persistence"],
  "chose":["postgres"],"rejected":["sqlite"],"supersedes":[]}
 ```
 
 `op` is `record` or `principle`. `precedent.py rebuild` replays the file in order, so
 entries must stay append-only — editing or reordering lines rewrites history.
+
+`project_path` and `portable` are how a replay on a second machine resolves onto
+the project that is already there instead of inventing another. A line written
+before they existed carries neither, and falls back to `project_id` — the native
+path — exactly as it did then.

@@ -280,6 +280,16 @@ def detect_project(root: pathlib.Path) -> dict:
     return {"id": str(root), "name": root.name, "contents": listing}
 
 
+def paths_of(row: dict) -> list[str]:
+    """Project.paths is newline-delimited rather than a list property.
+
+    Every consumer already filters in Python — containment reads all
+    projects and compares there — so a string costs nothing and does not
+    depend on the graph engine supporting list properties.
+    """
+    return [p for p in (row.get("paths") or "").split("\n") if p]
+
+
 def tags_of(s: "Store", project_id: str) -> list[str]:
     return [r["t"] for r in s.q(
         """MATCH (:Project {id:$id})-[:TAGGED]->(t:Tag) RETURN t.name AS t ORDER BY t""",
@@ -287,7 +297,26 @@ def tags_of(s: "Store", project_id: str) -> list[str]:
 
 
 def project_info(s: "Store", path: str, extra_tags: str = "") -> dict:
+    """Identify this directory, resolving it onto the node that already holds it.
+
+    `id` is the graph key — the native path of first sighting, which may be
+    another machine's. `path` is this machine's, because containment is
+    derived from paths and must be derived from local ones.
+
+    This reads and never writes: `check` and `suggest` hold a shared lock,
+    which cannot be promoted. The portable id is written onto the node by
+    `upsert_project`, on the commands that already take the write lock.
+    """
     info = detect_project(pathlib.Path(path))
+    info["path"] = info["id"]
+    info["portable"] = portable_id(pathlib.Path(info["path"]))
+    if info["portable"]:
+        rows = s.q("""MATCH (p:Project {portable:$pp})
+                      RETURN p.id AS id, p.paths AS paths LIMIT 1""",
+                   {"pp": info["portable"]})
+        if rows:
+            info["id"], info["paths"] = rows[0]["id"], paths_of(rows[0])
+    info.setdefault("paths", [info["path"]])
     info["tags"] = sorted(set(tags_of(s, info["id"])) | set(csv(extra_tags)))
     return info
 
@@ -312,38 +341,49 @@ def topic_vocabulary(s: "Store") -> list[dict]:
                   ORDER BY decisions DESC, topic""")
 
 
-def enclosing(s: "Store", project_id: str) -> list[dict]:
+def enclosing(s: "Store", info: dict) -> list[dict]:
     """Projects that physically contain this one, outermost first.
 
-    Containment needs no stored edge: `Project.id` is an absolute path, so a
-    monorepo root is a path prefix of its modules. Deriving it from the key
-    means it is always correct and never needs maintaining.
+    Containment needs no stored edge: a monorepo root is a path prefix of its
+    modules. Deriving it means it is always correct and never needs
+    maintaining. It is derived from `paths` rather than from `id`, because
+    `id` may be a path recorded on another machine — comparing this machine's
+    directory against a Windows key would silently report no containment.
+
+    `os.sep` here is not new platform surgery: every path in `paths` was
+    recorded natively, and comparing local paths against the local separator
+    is the existing containment semantics.
     """
     sep = os.sep
-    rows = s.q("MATCH (p:Project) RETURN p.id AS id, p.name AS name")
-    out = [r for r in rows if project_id.startswith(r["id"].rstrip(sep) + sep)]
+    here = info["path"]
+    rows = s.q("MATCH (p:Project) RETURN p.id AS id, p.name AS name, p.paths AS paths")
+    out = [r for r in rows
+           if r["id"] != info["id"]
+           and any(here.startswith(p.rstrip(sep) + sep) for p in paths_of(r) or [r["id"]])]
     return sorted(out, key=lambda r: len(r["id"]))
 
 
-def contained(s: "Store", project_id: str) -> list[dict]:
+def contained(s: "Store", info: dict) -> list[dict]:
     """Projects physically inside this one — the modules of a monorepo."""
     sep = os.sep
-    rows = s.q("MATCH (p:Project) RETURN p.id AS id, p.name AS name")
+    here = info["path"].rstrip(sep) + sep
+    rows = s.q("MATCH (p:Project) RETURN p.id AS id, p.name AS name, p.paths AS paths")
     return sorted((r for r in rows
-                   if r["id"].startswith(project_id.rstrip(sep) + sep)),
+                   if r["id"] != info["id"]
+                   and any(p.startswith(here) for p in paths_of(r) or [r["id"]])),
                   key=lambda r: r["id"])
 
 
-def same_tree(s: "Store", project_id: str) -> set[str]:
+def same_tree(s: "Store", info: dict) -> set[str]:
     """This project plus everything above and below it in the filesystem.
 
     These share a codebase, so they are structure rather than precedent: a
     module and its parent trivially share tags, and counting them as "closest
     projects" would crowd out genuinely comparable work elsewhere.
     """
-    return ({project_id}
-            | {r["id"] for r in enclosing(s, project_id)}
-            | {r["id"] for r in contained(s, project_id)})
+    return ({info["id"]}
+            | {r["id"] for r in enclosing(s, info)}
+            | {r["id"] for r in contained(s, info)})
 
 
 def effective_tags(s: "Store", info: dict) -> list[str]:
@@ -354,7 +394,7 @@ def effective_tags(s: "Store", info: dict) -> list[str]:
     other repos with the same shape.
     """
     tags = set(info["tags"])
-    for anc in enclosing(s, info["id"]):
+    for anc in enclosing(s, info):
         tags |= set(tags_of(s, anc["id"]))
     return sorted(tags)
 
@@ -368,7 +408,7 @@ def neighbours(s: "Store", info: dict, min_shared: int = 1) -> list[dict]:
     tags = effective_tags(s, info)
     if not tags:
         return []
-    skip = same_tree(s, info["id"])
+    skip = same_tree(s, info)
     rows = s.q("""MATCH (p:Project)-[:TAGGED]->(t:Tag)
                   WHERE t.name IN $tags
                   RETURN p.id AS id, p.name AS name,
@@ -389,7 +429,10 @@ def classify_prompt(s: "Store", info: dict) -> str:
         lines.append("  reuse these where they fit — precedent is ranked by how"
                      " many tags two projects share.")
     lines.append("  classify it from the project's contents, then tag it:")
-    lines.append(f"    precedent.py tag --project {info['id']} --add backend,java,distributed")
+    # info['path'], not info['id']: the id may be the path this project was
+    # first seen at on another machine, and a command the user cannot run is
+    # worse than no suggestion.
+    lines.append(f"    precedent.py tag --project {info['path']} --add backend,java,distributed")
     return "\n".join(lines)
 
 
@@ -407,8 +450,37 @@ def normalised(tag: str) -> str:
 
 
 def upsert_project(s: Store, info: dict) -> dict:
+    """Resolve by portable id first, then fall back to the native path.
+
+    The returned dict's `id` is the graph key, which may be a path from
+    another machine. `path` stays this machine's, because containment is
+    still derived from paths and must be derived from local ones.
+
+    Writes resolve as well as reads. Resolving only on read finds the
+    existing node while the write beside it creates a second one, so the
+    graph fragments a little more with every machine and every session,
+    invisibly.
+    """
+    local, portable = info["path"], info.get("portable")
+    key = local
+    if portable:
+        rows = s.q("MATCH (p:Project {portable:$pp}) RETURN p.id AS id LIMIT 1",
+                   {"pp": portable})
+        if rows:
+            key = rows[0]["id"]
     s.q("""MERGE (p:Project {id:$id}) SET p.name=$name, p.seen=$seen""",
-        {"id": info["id"], "name": info["name"], "seen": today()})
+        {"id": key, "name": info["name"], "seen": today()})
+    if portable:
+        # Backfilled on every write, so a repo that acquires a remote later
+        # gains its identity without a migration step to remember.
+        s.q("MATCH (p:Project {id:$id}) SET p.portable=$pp", {"id": key, "pp": portable})
+    row = s.q("MATCH (p:Project {id:$id}) RETURN p.paths AS paths", {"id": key})[0]
+    known = paths_of(row)
+    if local not in known:
+        known.append(local)
+        s.q("MATCH (p:Project {id:$id}) SET p.paths=$paths",
+            {"id": key, "paths": "\n".join(sorted(known))})
+    info["id"], info["paths"] = key, known
     return info
 
 
@@ -422,8 +494,17 @@ def attach_tags(s: Store, project_id: str, tags: list[str]) -> None:
 # ------------------------------------------------------------------------- writing
 
 def write_decision(s: Store, d: dict) -> str:
-    upsert_project(s, {"id": d["project_id"], "name": d["project_name"]})
-    attach_tags(s, d["project_id"], d.get("tags", []))
+    # Everything below keys off the RESOLVED id, never d["project_id"]: on a
+    # second machine the two differ, and a tag attached to the unresolved path
+    # matches no node and vanishes without an error — invisible until
+    # precedent goes quiet, because tag overlap is what ranks kin.
+    # An old journal line carries neither project_path nor portable and falls
+    # back to the native path, exactly as before.
+    pid = upsert_project(s, {"id": d["project_id"],
+                             "path": d.get("project_path", d["project_id"]),
+                             "name": d["project_name"],
+                             "portable": d.get("portable")})["id"]
+    attach_tags(s, pid, d.get("tags", []))
     s.q("""MERGE (n:Decision {id:$id})
            SET n.title=$title, n.statement=$statement, n.rationale=$rationale,
                n.scope=$scope, n.status='active', n.created=$created""",
@@ -432,7 +513,8 @@ def write_decision(s: Store, d: dict) -> str:
          "scope": d.get("scope", "architecture"),
          "created": d.get("created", today())})
     s.q("""MATCH (n:Decision {id:$id}), (p:Project {id:$project_id})
-           MERGE (n)-[:IN_PROJECT]->(p)""", d)
+           MERGE (n)-[:IN_PROJECT]->(p)""",
+        {"id": d["id"], "project_id": pid})
 
     for topic in d.get("topics", []):
         s.q("MERGE (t:Topic {name:$n})", {"n": topic})
@@ -475,6 +557,9 @@ def cmd_record(a, s: Store) -> None:
         "scope": a.scope,
         "created": today(),
         "project_id": info["id"], "project_name": info["name"],
+        # The identity and this machine's path, so a replay on another machine
+        # resolves the same project rather than inventing a second one.
+        "portable": info["portable"], "project_path": info["path"],
         "tags": info["tags"],
         "topics": [t.lower() for t in csv(a.topic)],
         "chose": csv(a.chose), "rejected": csv(a.rejected),
@@ -580,7 +665,7 @@ def worth_backfilling(s: "Store", info: dict) -> bool:
     the difference between a user who forgot this repo and a user who has never
     used the tool and is being sold it on their first session.
     """
-    if not (pathlib.Path(info["id"]) / ".git").exists():
+    if not (pathlib.Path(info["path"]) / ".git").exists():
         return False
     return s.q("MATCH (d:Decision) RETURN count(d) AS n")[0]["n"] > 0
 
@@ -598,7 +683,7 @@ def cmd_brief(a, s: Store) -> None:
                          collect(DISTINCT t.name) AS topics
                   ORDER BY created DESC LIMIT 25""", {"pid": info["id"]})
     kin = neighbours(s, info, a.min_shared)
-    above, below = enclosing(s, info["id"]), contained(s, info["id"])
+    above, below = enclosing(s, info), contained(s, info)
 
     inherited = s.q("""MATCH (d:Decision)-[:IN_PROJECT]->(p:Project)
                        OPTIONAL MATCH (d)-[:ABOUT]->(t:Topic)
@@ -735,6 +820,13 @@ def cmd_check(a, s: Store) -> None:
     if not a.chose:
         return
 
+    # Resolved once, here rather than in the loop below: the loop runs up to
+    # three times and project_info shells out to git. A bare
+    # Path(a.project).resolve() would miss the node whenever this checkout
+    # was first seen on another machine, and every acknowledged divergence
+    # would be reported as unacknowledged again.
+    pid = project_info(s, a.project)["id"]
+
     # Two things are worth interrupting a human for: reviving something they
     # already rejected, and quietly diverging from their own settled norm.
     print(f"\n== verdict for choosing '{a.chose}' ==")
@@ -789,8 +881,7 @@ def cmd_check(a, s: Store) -> None:
                            (d)-[:DIVERGES_FROM]->(:Decision)-[:CHOSE]->(:Option {name:$other})
                      WHERE d.status='active' AND d.despite IS NOT NULL
                      RETURN d.despite AS why LIMIT 1""",
-                  {"t": topic, "pid": str(pathlib.Path(a.project).resolve()),
-                   "other": r["other"]})
+                  {"t": topic, "pid": pid, "other": r["other"]})
         # A count with no date weighs a choice from 2019 in a dead repo exactly
         # as heavily as one from last month. The reader can discount it; the
         # tool should not decide the history expired.
@@ -906,11 +997,19 @@ def cmd_tag(a, s: Store) -> None:
 
     upsert_project(s, info)
     if add:
+        # Journalled like a record: without the identity here, a rebuild that
+        # replays a tag line before the first record line on that project
+        # creates the node with no portable id, and the record line then
+        # cannot resolve onto it.
         s.log("project_tags", {"project_id": info["id"], "name": info["name"],
+                               "portable": info["portable"],
+                               "project_path": info["path"],
                                "add": add})
         attach_tags(s, info["id"], add)
     for t in remove:
         s.log("project_tags", {"project_id": info["id"], "name": info["name"],
+                               "portable": info["portable"],
+                               "project_path": info["path"],
                                "remove": [t]})
         s.q("""MATCH (:Project {id:$id})-[r:TAGGED]->(:Tag {name:$n}) DELETE r""",
             {"id": info["id"], "n": t})
@@ -1079,12 +1178,17 @@ def replay_entry(s: Store, e: dict) -> None:
         # project_type is the pre-tag journal format: one type string per
         # project. Replaying it as a single tag migrates old graphs on the
         # first rebuild, with no separate migration step to forget.
-        upsert_project(s, {"id": e["project_id"], "name": e["name"]})
+        # Same rule as write_decision: everything keys off the resolved id, so
+        # a tag never lands on a node this machine does not have.
+        pid = upsert_project(s, {"id": e["project_id"],
+                                 "path": e.get("project_path", e["project_id"]),
+                                 "name": e["name"],
+                                 "portable": e.get("portable")})["id"]
         add = e.get("add") or ([e["type"]] if e.get("type") else [])
-        attach_tags(s, e["project_id"], add)
+        attach_tags(s, pid, add)
         for t in e.get("remove", []):
             s.q("""MATCH (:Project {id:$id})-[r:TAGGED]->(:Tag {name:$n}) DELETE r""",
-                {"id": e["project_id"], "n": t})
+                {"id": pid, "n": t})
     elif e["op"] == "regret":
         apply_regret(s, e)
     elif e["op"] == "principle":
@@ -1271,31 +1375,35 @@ def _check_drift() -> None:
 def _check_projects(s: Store) -> None:
     # Tags are a set, and overlap is what ranks precedent.
     proj = "/tmp/precedent-selftest-tags-proj"
-    upsert_project(s, {"id": proj, "name": "selftest"})
+    upsert_project(s, {"id": proj, "path": proj, "name": "selftest"})
     attach_tags(s, proj, ["selftest-backend", "selftest-java"])
     assert set(tags_of(s, proj)) == {"selftest-backend", "selftest-java"}
     other = "/tmp/precedent-selftest-other"
-    upsert_project(s, {"id": other, "name": "other"})
+    upsert_project(s, {"id": other, "path": other, "name": "other"})
     attach_tags(s, other, ["selftest-java"])
-    kin = neighbours(s, {"id": other, "tags": ["selftest-java"]})
+    kin = neighbours(s, {"id": other, "path": other, "tags": ["selftest-java"]})
     assert any(k["id"] == proj and k["n"] == 1 for k in kin), kin
-    kin2 = neighbours(s, {"id": other, "tags": ["selftest-java"]}, min_shared=2)
+    kin2 = neighbours(s, {"id": other, "path": other, "tags": ["selftest-java"]},
+                      min_shared=2)
     assert kin2 == [], "min_shared must exclude weakly-related projects"
 
-    # Containment is derived from the path key, so a monorepo needs no schema.
+    # Containment is derived from the paths, so a monorepo needs no schema.
     root, mod = "/tmp/precedent-selftest-root", "/tmp/precedent-selftest-root/mod"
     sibling = "/tmp/precedent-selftest-root-elsewhere"   # prefix-similar but NOT inside
     for pid, name in ((root, "root"), (mod, "mod"), (sibling, "elsewhere")):
-        upsert_project(s, {"id": pid, "name": name})
+        upsert_project(s, {"id": pid, "path": pid, "name": name})
     attach_tags(s, root, ["selftest-monorepo"])
     attach_tags(s, mod, ["selftest-java"])
     attach_tags(s, sibling, ["selftest-java"])
-    assert [r["id"] for r in enclosing(s, mod)] == [root], enclosing(s, mod)
-    assert [r["id"] for r in contained(s, root)] == [mod], contained(s, root)
-    assert enclosing(s, sibling) == [], "a shared name prefix is not containment"
-    assert effective_tags(s, {"id": mod, "tags": ["selftest-java"]}) \
+    mod_info = {"id": mod, "path": mod}
+    root_info = {"id": root, "path": root}
+    assert [r["id"] for r in enclosing(s, mod_info)] == [root], enclosing(s, mod_info)
+    assert [r["id"] for r in contained(s, root_info)] == [mod], contained(s, root_info)
+    assert enclosing(s, {"id": sibling, "path": sibling}) == [], \
+        "a shared name prefix is not containment"
+    assert effective_tags(s, {**mod_info, "tags": ["selftest-java"]}) \
         == ["selftest-java", "selftest-monorepo"], "a module inherits enclosing tags"
-    kin3 = {r["id"] for r in neighbours(s, {"id": mod, "tags": ["selftest-java"]})}
+    kin3 = {r["id"] for r in neighbours(s, {**mod_info, "tags": ["selftest-java"]})}
     assert sibling in kin3, "comparable work outside the tree must count as kin"
     assert root not in kin3, "the enclosing project is structure, not precedent"
     assert mod not in kin3, "a project is not its own kin"
@@ -1325,9 +1433,9 @@ def _check_decisions(s: Store) -> None:
 
     # The backfill nudge fires in a repo the graph has never seen, and nowhere
     # else — a bare directory is not a project worth prompting about.
-    assert not worth_backfilling(s, {"id": str(tmp)}), "a non-repo must not be nudged"
+    assert not worth_backfilling(s, {"path": str(tmp)}), "a non-repo must not be nudged"
     (tmp / ".git").mkdir(exist_ok=True)
-    assert worth_backfilling(s, {"id": str(tmp)}), "a repo with a populated graph must be"
+    assert worth_backfilling(s, {"path": str(tmp)}), "a repo with a populated graph must be"
     (tmp / ".git").rmdir()
 
     d2 = {**d, "id": "selftest-2", "chose": ["sqlite"], "supersedes": ["selftest-1"]}
@@ -2046,6 +2154,27 @@ def _check_identity(s: Store) -> None:
         run("remote", "add", "origin", "git@github.com:asm0dey/precedent.git")
         assert portable_id(root) == "github.com/asm0dey/precedent"
         assert portable_id(root / "mod") == "github.com/asm0dey/precedent#/mod"
+
+    # Two machines, one repo: the second must resolve onto the first node,
+    # for reads AND writes. Read-only resolution finds the existing node
+    # while writes create a second one, fragmenting the graph a little more
+    # with every machine and every session, invisibly.
+    linux, windows = "/tmp/precedent-selftest-i", "C:\\dev\\precedent-selftest-i"
+    pp = "github.com/asm0dey/selftest-i"
+    try:
+        a_info = upsert_project(s, {"id": linux, "path": linux, "name": "i",
+                                    "portable": pp})
+        b_info = upsert_project(s, {"id": windows, "path": windows, "name": "i",
+                                    "portable": pp})
+        assert a_info["id"] == linux, a_info
+        assert b_info["id"] == linux, "the second sighting must resolve onto the first"
+        assert s.q("MATCH (p:Project {portable:$pp}) RETURN count(p) AS n",
+                   {"pp": pp}) == [{"n": 1}], "one repo, one node"
+        row = s.q("MATCH (p:Project {id:$id}) RETURN p.paths AS paths", {"id": linux})[0]
+        assert set(paths_of(row)) == {linux, windows}, row
+    finally:
+        s.q("MATCH (p:Project {id:$id}) DETACH DELETE p", {"id": linux})
+        s.q("MATCH (p:Project {id:$id}) DETACH DELETE p", {"id": windows})
 
 
 def cmd_selftest(a, s: Store) -> None:
