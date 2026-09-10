@@ -65,10 +65,15 @@ def resolve_home(home: pathlib.Path) -> pathlib.Path:
     if not pointer.is_file():
         return home
     content = pointer.read_text().strip()
-    target = pathlib.Path(content).expanduser() if content else None
-    if not content or not target.is_absolute():
+    if not content:
         raise SystemExit(
-            f"error: {pointer} does not hold a usable path (contents: {content!r}). "
+            f"error: {pointer} is empty (contents: {content!r}). "
+            "It should contain exactly one absolute path, written by `init --location`. "
+            "Fix or delete it by hand, then retry.")
+    target = pathlib.Path(content).expanduser()
+    if not target.is_absolute():
+        raise SystemExit(
+            f"error: {pointer} does not hold an absolute path (contents: {content!r}). "
             "It should contain exactly one absolute path, written by `init --location`. "
             "Fix or delete it by hand, then retry.")
     return target
