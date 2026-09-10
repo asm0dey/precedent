@@ -18,8 +18,10 @@ it writes, shared if it only reads. The lock is not optional for writers:
 concurrent processes on one embedded database silently drop writes (measured:
 120 writes across 6 processes -> 60 stored, zero errors raised). Readers share
 because a full open/query/close cycle is about a millisecond and queueing them
-behind a write buys nothing — and because `selftest` proves grafeo hands a
-reader a consistent view while a writer is mid-run.
+behind a write buys nothing. Note that "reader" means reads no DECISION —
+opening the graph at all appends to its write-ahead log, so the shared lock is
+a bet that grafeo tolerates concurrent WAL appenders. `selftest` tests that bet
+rather than assuming it.
 """
 from __future__ import annotations
 
@@ -53,9 +55,13 @@ class Store:
         # whole CLI failed to start there. Hand-rolling a cross-platform
         # locking shim means owning a concurrency primitive on an OS this
         # project does not run and cannot test.
-        # ReadWriteLock, not FileLock: `check`, `suggest` and `export` only
-        # read, and queueing them behind a write serialises the common case
-        # for nothing. Writers stay exclusive.
+        # ReadWriteLock, not FileLock: `check`, `suggest` and `export`
+        # change no decision, and queueing them behind a write serialises the
+        # common case for nothing. Writers stay exclusive.
+        # "Reader" is about decisions, not bytes: opening a grafeo db appends
+        # ~10 bytes to its WAL even with no query run, so a shared lock lets
+        # several processes append to that log at once. _check_grafeo_readers
+        # is what says that is survivable.
         # 30s timeout, not the default unbounded wait, and it is on readers
         # too: the SessionStart hook runs `brief` on every session start, and
         # an unbounded lock would hang every new session silently if a slow
@@ -1299,8 +1305,10 @@ def _check_store(s: Store) -> None:
 
         # A held write lock excludes both a second writer and a reader.
         write_held = tmpdir / "write-held.lock"
-        holder = fork_holder(write_held, "write")
+        # Contender first: fork_holder asserts, and a holder forked before it
+        # would be left sleeping on the temp lock file if that assert fired.
         contender = filelock.ReadWriteLock(str(write_held))
+        holder = fork_holder(write_held, "write")
         try:
             for mode in ("write", "read"):
                 started = time.monotonic()
@@ -1321,8 +1329,8 @@ def _check_store(s: Store) -> None:
 
         # A held read lock does NOT exclude a second reader. This is the split.
         read_held = tmpdir / "read-held.lock"
-        holder = fork_holder(read_held, "read")
         contender = filelock.ReadWriteLock(str(read_held))
+        holder = fork_holder(read_held, "read")
         try:
             try:
                 contender.acquire_read(WAIT)
@@ -1403,7 +1411,13 @@ def _check_grafeo_readers() -> None:
     readers assert they never see a row where they disagree.
 
     Deliberately unlocked. The point is what grafeo does when the lock lets
-    two processes in, which is exactly what the read lock now permits.
+    several processes in, which is exactly what the read lock now permits.
+
+    And they really do collide. A "reader" here reads no decision, but it is
+    not passive at the file level: opening a grafeo db appends ~10 bytes to
+    its write-ahead log before any query runs, and closing appends more. So
+    the shared read lock is a bet that grafeo tolerates concurrent WAL
+    appenders against a live writer, and this is where that bet is tested.
 
     Each reader reopens the db every round. That is not a detail — a reader
     that opens once and loops sees a single frozen value however long the
@@ -1416,9 +1430,14 @@ def _check_grafeo_readers() -> None:
     import subprocess
     import tempfile
 
-    WRITE_BUDGET = 2.0   # wall clock, not iterations, so the run is bounded
+    WRITE_BUDGET = 3.0   # wall clock, not iterations, so the run is bounded
     READ_BUDGET = 1.2    # ends inside the writer's window, from both sides
     WARMUP = 0.4         # let the node exist before readers look for it
+    READERS = 4          # several appenders on one WAL, not just a pair
+    STUCK = 5.0          # a reader past this is wedged, not slow
+    # WRITE_BUDGET is an upper bound nothing waits on: the writer is killed as
+    # soon as the readers are reaped, so raising it costs no wall clock and
+    # only widens the margin behind the `writer.poll()` assertion below.
 
     writer_src = (
         "import sys, time, grafeo\n"
@@ -1453,13 +1472,22 @@ def _check_grafeo_readers() -> None:
         readers: list[subprocess.Popen] = []
         try:
             time.sleep(WARMUP)
-            for _ in range(2):
+            for _ in range(READERS):
                 readers.append(subprocess.Popen(
                     [sys.executable, "-c", reader_src, db, str(READ_BUDGET)],
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True))
             results = []
             for i, r in enumerate(readers):
-                out, err = r.communicate()
+                # Bounded like every other wait here. A reader wedged inside
+                # g.execute under contention is the very thing this check
+                # probes, and it must fail loudly rather than hang the
+                # selftest; the finally below reaps it either way.
+                try:
+                    out, err = r.communicate(timeout=READ_BUDGET + STUCK)
+                except subprocess.TimeoutExpired:
+                    raise AssertionError(
+                        f"reader {i} outlived a {READ_BUDGET:g}s budget by {STUCK:g}s — "
+                        "it is stuck in grafeo while a writer holds the graph open")
                 assert r.returncode == 0, (
                     f"reader {i} crashed while a writer held the graph open: "
                     f"{err.strip()[-500:]}")
@@ -1483,6 +1511,49 @@ def _check_grafeo_readers() -> None:
             writer.wait()
 
 
+def _check_lock_modes() -> None:
+    """Every command's lock mode, against a table written out by hand.
+
+    build_parser's `writes=True` fallback covers a subparser that forgets the
+    flag. Nothing covers one that sets it wrongly, and the two mistakes are not
+    symmetric: a reader marked True is merely slow, a writer marked False
+    corrupts the graph the lock exists to protect. This classification is the
+    whole risk surface of the read-write split, so it gets an assertion.
+
+    The expected mapping is literal, not derived from the parser. Deriving it
+    would track whatever the table says and never fail; written out, changing
+    a command's mode means changing it here too, on purpose.
+    """
+    import argparse
+
+    expected = {
+        # read-only in the sense that matters: they settle no decision
+        "check": False, "suggest": False, "export": False,
+        "maintain": False,      # until --apply; see wants_write_lock
+        # writers
+        "record": True, "tag": True, "regret": True, "principle": True,
+        "rebuild": True, "selftest": True,
+        "brief": True,          # the portable-id backfill mutates
+        "cypher": True,         # arbitrary query text; CREATE is unknowable up front
+        "init": True,           # returns before any Store is opened
+    }
+    p = build_parser()
+    subparsers = [x for x in p._actions if isinstance(x, argparse._SubParsersAction)]
+    assert len(subparsers) == 1, "expected exactly one subparser group"
+    actual = {name: sp.get_default("writes") for name, sp in subparsers[0].choices.items()}
+    assert actual == expected, (
+        "command lock modes changed — a writer classified as a reader corrupts "
+        f"the graph, so confirm this on purpose:\n  got      {actual}\n  expected {expected}")
+
+    # maintain is the derived case, and the derivation is the thing that can rot.
+    assert wants_write_lock(p.parse_args(["maintain"])) is False, "maintain must read"
+    assert wants_write_lock(p.parse_args(["maintain", "--apply"])) is True, (
+        "maintain --apply deletes nodes and must take the write lock")
+    # and the flag still reaches the mode for an ordinary reader and writer
+    assert wants_write_lock(p.parse_args(["check", "--topic", "t"])) is False
+    assert wants_write_lock(p.parse_args(["record", "--title", "t"])) is True
+
+
 def cmd_selftest(a, s: Store) -> None:
     """One runnable check over the paths that contain real logic.
 
@@ -1498,6 +1569,7 @@ def cmd_selftest(a, s: Store) -> None:
     _check_relocate()
     _check_export(s)
     _check_store(s)
+    _check_lock_modes()
     _check_grafeo_readers()
     after = s.q("MATCH (n) RETURN count(n) AS n")[0]["n"]
     assert after == before, f"selftest changed node count {before} -> {after}"
@@ -1506,7 +1578,7 @@ def cmd_selftest(a, s: Store) -> None:
 
 # ---------------------------------------------------------------------------- main
 
-def main(argv=None) -> int:
+def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="precedent", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--home", default=str(HOME), help="graph + journal directory")
@@ -1585,8 +1657,9 @@ def main(argv=None) -> int:
 
     m = sub.add_parser("maintain", help="contradictions, dead projects, orphans, counts")
     m.add_argument("--apply", action="store_true", help="perform the safe cleanups")
-    # `writes` is derived from --apply in main(): without it maintain only reports.
-    m.set_defaults(fn=cmd_maintain)
+    # Reports only, until --apply deletes orphan nodes; wants_write_lock()
+    # promotes it then.
+    m.set_defaults(writes=False, fn=cmd_maintain)
 
     sub.add_parser("rebuild", help="replay journal.jsonl into a fresh graph"
                    ).set_defaults(writes=True, fn=cmd_rebuild)
@@ -1609,17 +1682,28 @@ def main(argv=None) -> int:
     ex.set_defaults(writes=False, fn=cmd_export)
 
     sub.add_parser("selftest").set_defaults(writes=True, fn=cmd_selftest)
+    return p
 
-    a = p.parse_args(argv)
+
+def wants_write_lock(a) -> bool:
+    """Whether a parsed command needs the exclusive lock.
+
+    Answered before the Store exists, because it has to be: ReadWriteLock
+    refuses to promote a read lock to a write lock, deliberately, so a command
+    settles which one it wants before it takes either.
+    """
+    if a.cmd == "maintain":
+        # --apply deletes orphan nodes; without it maintain only reports.
+        return bool(a.apply)
+    return a.writes
+
+
+def main(argv=None) -> int:
+    a = build_parser().parse_args(argv)
     if a.cmd == "init":
         cmd_init(a)
         return 0
-    if a.cmd == "maintain":
-        # --apply deletes orphan nodes; without it maintain only reports.
-        # Resolved here, before the Store exists, because it must be a choice
-        # of mode: a read lock can never be upgraded to a write lock.
-        a.writes = bool(a.apply)
-    with Store(pathlib.Path(a.home), write=a.writes) as s:
+    with Store(pathlib.Path(a.home), write=wants_write_lock(a)) as s:
         a.fn(a, s)
     return 0
 
