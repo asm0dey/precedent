@@ -6,8 +6,23 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Least privilege: nothing here writes to the repo.
+permissions:
+  contents: read
+
+# One in-flight run per branch. Superseded PR pushes are cancelled so a
+# required check reflects the head commit rather than an older one; pushes to
+# main are NOT cancelled, so main keeps an unbroken result history.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   selftest:
+    # A required check that hangs blocks every merge until someone notices.
+    # session-start.ps1 has no internal timeout and uv can stall on the
+    # network, so the job carries the bound instead.
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -49,6 +64,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "session-start.ps1 exited $LASTEXITCODE" }
 
   manifest:
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
