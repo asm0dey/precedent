@@ -18,18 +18,20 @@ jobs:
       - uses: astral-sh/setup-uv@v10
       - name: selftest
         shell: bash
-        # RUNNER_TEMP is read here via bash's own `$VAR` expansion (a real
-        # process environment variable), not GitHub's `${{ }}` expression
-        # substitution. That distinction matters on windows-latest: `${{ }}`
-        # substitutes literal text into the script BEFORE bash parses it, so
-        # a Windows path's backslashes go through bash's own escape-removal
-        # and vanish (the documented actions/runner footgun). `$RUNNER_TEMP`
-        # instead resolves at bash's runtime from the environment, so its
-        # backslashes are expansion output, never touched by quote/escape
-        # removal, and survive into argv intact. The scratch `--home` is not
-        # optional either way: a default-home `selftest` would enumerate
-        # every real Project node and shell out to `git` in each one's
-        # directory (see identity_gaps() in scripts/precedent.py).
+        # The value is double-quoted, which is what keeps it safe on
+        # windows-latest. Bash only strips a backslash inside double quotes
+        # when the next character is $, `, ", \ or newline — a backslash
+        # before an ordinary letter (as in a Windows path) survives quoted.
+        # The documented actions/runner footgun (a Windows path's
+        # backslashes vanishing) hits an UNQUOTED `${{ github.action_path }}`
+        # or `${{ runner.temp }}` substituted straight into the script
+        # source; it is the missing quotes that break it, not the choice of
+        # `${{ }}` over `$VAR`. Quoted, either form is fine — this uses
+        # `$RUNNER_TEMP` (a real env var) simply because it needs no `{{ }}`.
+        # The scratch `--home` is not optional either way: a default-home
+        # `selftest` would enumerate every real Project node and shell out
+        # to `git` in each one's directory (see identity_gaps() in
+        # scripts/precedent.py).
         run: uv run scripts/precedent.py --home "${RUNNER_TEMP}/precedent-ci" selftest
 
   manifest:
