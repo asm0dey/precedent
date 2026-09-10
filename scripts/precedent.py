@@ -13,11 +13,13 @@ The journal exists because the graph engine is young (v0.5.x). If it ever eats
 itself, `precedent.py rebuild` replays the journal and nothing is lost. The journal is
 also plain text, so it diffs and survives in git.
 
-Every subcommand is a short-lived process holding an exclusive file lock.
-The lock is not optional: concurrent processes on one embedded database
-silently drop writes (measured: 120 writes across 6 processes -> 60 stored,
-zero errors raised). Serializing costs nothing here — a full open/query/close
-cycle is about a millisecond.
+Every subcommand is a short-lived process holding a file lock: exclusive if
+it writes, shared if it only reads. The lock is not optional for writers:
+concurrent processes on one embedded database silently drop writes (measured:
+120 writes across 6 processes -> 60 stored, zero errors raised). Readers share
+because a full open/query/close cycle is about a millisecond and queueing them
+behind a write buys nothing — and because `selftest` proves grafeo hands a
+reader a consistent view while a writer is mid-run.
 """
 from __future__ import annotations
 
@@ -39,29 +41,42 @@ SCOPES = ("architecture", "business", "process", "tooling", "product")
 # --------------------------------------------------------------------------- store
 
 class Store:
-    def __init__(self, home: pathlib.Path = HOME):
+    def __init__(self, home: pathlib.Path = HOME, write: bool = True):
         self.home = home
         home.mkdir(parents=True, exist_ok=True)
         self.db_path = home / "graph.db"
         self.journal = home / "journal.jsonl"
         self.lock_path = home / ".lock"
+        self.write = write
         # This library, not raw POSIX file locking: the POSIX module does
         # not exist on Windows, and it was imported at module scope, so the
         # whole CLI failed to start there. Hand-rolling a cross-platform
         # locking shim means owning a concurrency primitive on an OS this
         # project does not run and cannot test.
-        # 30s timeout, not the default unbounded wait: the SessionStart hook
-        # runs `brief` on every session start, and an unbounded lock would
-        # hang every new session silently if a slow `rebuild` held it.
-        self._lock = filelock.FileLock(str(self.lock_path), timeout=30)
+        # ReadWriteLock, not FileLock: `check`, `suggest` and `export` only
+        # read, and queueing them behind a write serialises the common case
+        # for nothing. Writers stay exclusive.
+        # 30s timeout, not the default unbounded wait, and it is on readers
+        # too: the SessionStart hook runs `brief` on every session start, and
+        # an unbounded lock would hang every new session silently if a slow
+        # `rebuild` held it.
+        self._lock = filelock.ReadWriteLock(str(self.lock_path), timeout=30)
 
     def __enter__(self):
+        # The timeout is passed per call rather than left to the instance.
+        # acquire_read/acquire_write default to -1, wait forever, and never
+        # consult self.timeout — only the read_lock/write_lock context
+        # managers do that, and they are context managers, so using them here
+        # would mean holding the graph open inside a nested `with`. Relying on
+        # the attribute would leave the 30s bound configured and unenforced.
+        acquire = self._lock.acquire_write if self.write else self._lock.acquire_read
         try:
-            self._lock.acquire()
+            acquire(self._lock.timeout)
         except filelock.Timeout:
+            mode = "write" if self.write else "read"
             raise SystemExit(
-                f"error: could not acquire lock at {self.lock_path} "
-                f"within 30s — another precedent process holds it")
+                f"error: could not acquire a {mode} lock at {self.lock_path} "
+                f"within {self._lock.timeout:g}s — another precedent process holds it")
         import grafeo
 
         self.db = grafeo.GrafeoDB(str(self.db_path))
@@ -1218,55 +1233,254 @@ def _check_export(s: Store) -> None:
 
 
 def _check_store(s: Store) -> None:
-    """The lock must actually exclude a second process, and Store must
-    wire it to the file it claims.
+    """The lock must exclude a second process in the modes it claims, and it
+    must give up rather than wait forever.
 
     A lock that silently does not lock is the failure mode grafeo#405
     documents: 120 writes across 6 processes, 60 stored, no errors raised.
-    Two FileLock objects for one path in one process would not prove
-    exclusion — filelock returns the same instance for a given path — so
-    exclusion is proved with a forked holder process instead.
+    Two lock objects for one path in one process would not prove exclusion —
+    filelock returns the same instance for a given path — so every
+    proposition here is proved against a forked holder process.
 
-    The exclusion half runs against a throwaway path in a temp directory,
-    not s.lock_path: s's own lock is held for the whole selftest command
-    (main() enters the Store before dispatching to cmd_selftest), and
-    contending on the real path here would mean releasing the lock guarding
-    the open graph db for the duration of the check — exactly the hazard
-    the lock exists to prevent. A throwaway path proves the same filelock
-    mechanics without mutating the store under test. Wiring — that Store
-    actually built its lock against lock_path, with the intended timeout —
-    is checked directly against s._lock's own attributes instead.
+    The contention runs against throwaway paths in a temp directory, not
+    s.lock_path: s's own lock is held for the whole selftest command (main()
+    enters the Store before dispatching to cmd_selftest), and contending on
+    the real path here would mean releasing the lock guarding the open graph
+    db for the duration of the check — exactly the hazard the lock exists to
+    prevent. A throwaway path proves the same filelock mechanics without
+    mutating the store under test. Wiring — that Store built its lock against
+    lock_path, in the mode it was asked for — is checked against s._lock's own
+    attributes instead, and Store's own acquire path is exercised by two
+    throwaway Stores on throwaway homes at the end.
+
+    The timeout is proved behaviourally, not by reading the attribute back.
+    acquire_read/acquire_write default to waiting forever and never consult
+    the instance timeout — only the read_lock/write_lock context managers do
+    — so a Store that configured 30s and then acquired without passing it
+    would satisfy an attribute assert while hanging every session start. The
+    holder below outlives the contender's timeout twentyfold, so an unenforced
+    timeout cannot pass quietly: it either waits out the holder and then
+    acquires, which the `else` branch fails on, or it raises Timeout long
+    after it was asked to, which LATE fails on.
     """
+    assert s.write is True, "selftest mutates the graph; Store must be in write mode"
     assert s._lock.lock_file == str(s.lock_path), "Store did not lock its own path"
+    assert s._lock._current_mode == "write", "a writer command must hold a write lock"
+    # Documentation of the configured value; the contention below is what
+    # proves the mechanism.
     assert s._lock.timeout == 30, "Store lock must have a bounded timeout"
 
     import subprocess
     import tempfile
     import filelock
 
+    # Holds `mode` on argv[1] until killed, announcing when it actually has it.
+    holder_src = (
+        "import sys, time, filelock;"
+        "l = filelock.ReadWriteLock(sys.argv[1]);"
+        "getattr(l, 'acquire_' + sys.argv[2])(10);"
+        "print('held', flush=True);"
+        "time.sleep(10)")
+
+    def fork_holder(path: pathlib.Path, mode: str) -> subprocess.Popen:
+        h = subprocess.Popen([sys.executable, "-c", holder_src, str(path), mode],
+                             stdout=subprocess.PIPE, text=True)
+        assert h.stdout is not None
+        assert h.stdout.readline().strip() == "held", f"{mode} holder never acquired"
+        return h
+
+    # Long enough that an unenforced timeout is unmistakable, short enough to
+    # keep the selftest quick.
+    WAIT = 0.5
+    LATE = 5.0
+
     with tempfile.TemporaryDirectory() as tmp:
-        lock_path = pathlib.Path(tmp) / ".lock"
-        holder = subprocess.Popen(
-            [sys.executable, "-c",
-             "import sys, time, filelock;"
-             "l = filelock.FileLock(sys.argv[1]);"
-             "l.acquire();"
-             "print('held', flush=True);"
-             "time.sleep(5)",
-             str(lock_path)],
-            stdout=subprocess.PIPE, text=True)
+        tmpdir = pathlib.Path(tmp)
+
+        # A held write lock excludes both a second writer and a reader.
+        write_held = tmpdir / "write-held.lock"
+        holder = fork_holder(write_held, "write")
+        contender = filelock.ReadWriteLock(str(write_held))
         try:
-            assert holder.stdout is not None
-            assert holder.stdout.readline().strip() == "held"
-            contended = filelock.FileLock(str(lock_path))
-            try:
-                contended.acquire(timeout=0.5)
-                raise AssertionError("lock did not exclude a second process")
-            except filelock.Timeout:
-                pass
+            for mode in ("write", "read"):
+                started = time.monotonic()
+                try:
+                    getattr(contender, "acquire_" + mode)(WAIT)
+                except filelock.Timeout:
+                    waited = time.monotonic() - started
+                    assert waited < LATE, (
+                        f"a {mode} lock waited {waited:.1f}s for a {WAIT}s timeout — "
+                        "the timeout is configured but not enforced")
+                else:
+                    contender.release()
+                    raise AssertionError(f"a held write lock let a {mode} lock in")
         finally:
+            contender.close()
             holder.kill()
             holder.wait()
+
+        # A held read lock does NOT exclude a second reader. This is the split.
+        read_held = tmpdir / "read-held.lock"
+        holder = fork_holder(read_held, "read")
+        contender = filelock.ReadWriteLock(str(read_held))
+        try:
+            try:
+                contender.acquire_read(WAIT)
+            except filelock.Timeout:
+                raise AssertionError("readers were serialised against each other")
+            contender.release()
+        finally:
+            contender.close()
+            holder.kill()
+            holder.wait()
+
+        # Store.__enter__ must PASS the timeout, not merely configure it. The
+        # asserts above read the configured value back, which a Store that
+        # acquired with no argument would still satisfy while waiting forever.
+        # A throwaway Store on a throwaway home, its timeout turned down to
+        # WAIT, is entered against a lock a second process already holds for
+        # writing: it has to give up, in about its own timeout rather than
+        # whenever the holder happens to exit.
+        probe = Store(tmpdir / "store", write=False)
+        probe._lock.timeout = WAIT
+        holder = fork_holder(probe.lock_path, "write")
+        try:
+            started = time.monotonic()
+            try:
+                probe.__enter__()
+            except SystemExit as exc:
+                waited = time.monotonic() - started
+                assert waited < LATE, (
+                    f"Store waited {waited:.1f}s to fail a {WAIT}s lock — __enter__ "
+                    "configures the timeout without passing it to acquire")
+                assert "read lock" in str(exc), (
+                    f"the lock error must name the mode it wanted, got: {exc}")
+            else:
+                probe.__exit__()
+                raise AssertionError(
+                    "Store opened a graph another process holds for writing")
+        finally:
+            probe._lock.close()
+            holder.kill()
+            holder.wait()
+
+        # ...and a reader Store must really take a READ lock. Nothing above
+        # would notice a __enter__ that ignored self.write and locked
+        # exclusively every time: the raw locks prove filelock lets readers
+        # share, not that Store asks it to. So enter a reader against a lock
+        # another process holds for READING — which only a read lock can join
+        # — and confirm the mode it ended up in.
+        probe = Store(tmpdir / "shared-store", write=False)
+        probe._lock.timeout = WAIT
+        holder = fork_holder(probe.lock_path, "read")
+        entered = False
+        try:
+            try:
+                probe.__enter__()
+                entered = True
+            except SystemExit as exc:
+                raise AssertionError(
+                    f"a reader Store was locked out by another reader: {exc}")
+            assert probe._lock._current_mode == "read", (
+                "a reader command took a "
+                f"{probe._lock._current_mode} lock — the split is not wired up")
+        finally:
+            if entered:
+                probe.__exit__()
+            probe._lock.close()
+            holder.kill()
+            holder.wait()
+
+
+def _check_grafeo_readers() -> None:
+    """Readers must not observe a torn write.
+
+    The read-write split lets readers run while a writer holds the graph open.
+    grafeo is v0.5 and its issue #405 documents writers silently dropping
+    writes (120 across 6 processes, 60 stored, nothing raised); nothing
+    documented reader isolation. So this proves it rather than assuming it:
+    a writer process loops writes whose two properties must always agree, and
+    readers assert they never see a row where they disagree.
+
+    Deliberately unlocked. The point is what grafeo does when the lock lets
+    two processes in, which is exactly what the read lock now permits.
+
+    Each reader reopens the db every round. That is not a detail — a reader
+    that opens once and loops sees a single frozen value however long the
+    writer runs, so it could never observe a tear and the check would pass
+    vacuously. Reopening is also the true shape of every precedent command:
+    open, query, close. Two independent guards keep the check honest: readers
+    must have seen the writer's value advance (more than one distinct value),
+    and the writer must still be running when they finish.
+    """
+    import subprocess
+    import tempfile
+
+    WRITE_BUDGET = 2.0   # wall clock, not iterations, so the run is bounded
+    READ_BUDGET = 1.2    # ends inside the writer's window, from both sides
+    WARMUP = 0.4         # let the node exist before readers look for it
+
+    writer_src = (
+        "import sys, time, grafeo\n"
+        "g = grafeo.GrafeoDB(sys.argv[1])\n"
+        "end = time.monotonic() + float(sys.argv[2])\n"
+        "i = 0\n"
+        "while time.monotonic() < end:\n"
+        "    i += 1\n"
+        "    list(g.execute(\"MERGE (n:RWProbe {id:'p'}) SET n.a=$i, n.b=$i "
+        "RETURN n.a AS a\", {\"i\": i}))\n"
+        "g.close()\n")
+
+    reader_src = (
+        "import json, sys, time, grafeo\n"
+        "end = time.monotonic() + float(sys.argv[2])\n"
+        "seen, torn = set(), []\n"
+        "while time.monotonic() < end:\n"
+        "    g = grafeo.GrafeoDB(sys.argv[1])\n"
+        "    for r in g.execute(\"MATCH (n:RWProbe {id:'p'}) "
+        "RETURN n.a AS a, n.b AS b\"):\n"
+        "        seen.add(r['a'])\n"
+        "        if r['a'] != r['b']:\n"
+        "            torn.append([r['a'], r['b']])\n"
+        "    g.close()\n"
+        "print(json.dumps({'distinct': len(seen), 'torn': torn[:5]}), flush=True)\n")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        db = str(pathlib.Path(tmp) / "probe.db")
+        writer = subprocess.Popen(
+            [sys.executable, "-c", writer_src, db, str(WRITE_BUDGET)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        readers: list[subprocess.Popen] = []
+        try:
+            time.sleep(WARMUP)
+            for _ in range(2):
+                readers.append(subprocess.Popen(
+                    [sys.executable, "-c", reader_src, db, str(READ_BUDGET)],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True))
+            results = []
+            for i, r in enumerate(readers):
+                out, err = r.communicate()
+                assert r.returncode == 0, (
+                    f"reader {i} crashed while a writer held the graph open: "
+                    f"{err.strip()[-500:]}")
+                results.append(json.loads(out))
+            if writer.poll() is not None:
+                raise AssertionError(
+                    "the writer stopped before the readers did, so nothing was read "
+                    f"under contention: {writer.communicate()[1].strip()[-500:]}")
+            for i, res in enumerate(results):
+                assert not res["torn"], (
+                    f"reader {i} observed a torn write {res['torn']}: grafeo does not "
+                    "isolate a reader from a concurrent writer, so the read lock is unsafe")
+                assert res["distinct"] > 1, (
+                    f"reader {i} saw {res['distinct']} distinct value(s) — it never watched "
+                    "the writer advance, so this check proved nothing")
+        finally:
+            for r in readers:
+                r.kill()
+                r.wait()
+            writer.kill()
+            writer.wait()
 
 
 def cmd_selftest(a, s: Store) -> None:
@@ -1284,6 +1498,7 @@ def cmd_selftest(a, s: Store) -> None:
     _check_relocate()
     _check_export(s)
     _check_store(s)
+    _check_grafeo_readers()
     after = s.q("MATCH (n) RETURN count(n) AS n")[0]["n"]
     assert after == before, f"selftest changed node count {before} -> {after}"
     print(f"selftest ok ({before} nodes, unchanged)")
@@ -1295,6 +1510,10 @@ def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="precedent", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--home", default=str(HOME), help="graph + journal directory")
+    # Every subparser declares whether it writes. The fallback is deliberate:
+    # a command wrongly treated as a writer is merely slow, one wrongly
+    # treated as a reader corrupts the graph.
+    p.set_defaults(writes=True)
     sub = p.add_subparsers(dest="cmd", required=True)
 
     def proj(sp):
@@ -1314,34 +1533,36 @@ def main(argv=None) -> int:
     r.add_argument("--diverges-from", default="",
                    help="decision ids departed from (inferred from --topic if omitted)")
     r.add_argument("--id", default="")
-    proj(r); r.set_defaults(fn=cmd_record)
+    proj(r); r.set_defaults(writes=True, fn=cmd_record)
 
     b = sub.add_parser("brief", help="project type, decisions here, precedent from similar projects")
     b.add_argument("--min-shared", type=int, default=1,
                    help="how many tags a project must share to count as comparable")
     b.add_argument("--only-if-relevant", action="store_true",
                    help="print nothing when this project has no decisions and no comparable projects")
-    proj(b); b.set_defaults(fn=cmd_brief)
+    # A writer despite being the hook-invoked, most-run command: the portable-id
+    # backfill mutates, and a read lock can never be promoted mid-run.
+    proj(b); b.set_defaults(writes=True, fn=cmd_brief)
 
     c = sub.add_parser("check", help="precedent for a topic, plus a conflict verdict")
     c.add_argument("--topic", required=True)
     c.add_argument("--chose", default="", help="the option you are leaning toward")
     c.add_argument("--project", default=".",
                    help="used to spot a divergence already acknowledged here")
-    c.set_defaults(fn=cmd_check)
+    c.set_defaults(writes=False, fn=cmd_check)
 
     g = sub.add_parser("suggest", help="decisions not yet made here, and principle candidates")
     g.add_argument("--min-shared", type=int, default=1,
                    help="how many tags a project must share to count as comparable")
     g.add_argument("--min-projects", type=int, default=2)
     g.add_argument("--min-principle", type=int, default=3)
-    proj(g); g.set_defaults(fn=cmd_suggest)
+    proj(g); g.set_defaults(writes=False, fn=cmd_suggest)
 
     pr = sub.add_parser("principle", help="promote a repeated choice to a standing principle")
     pr.add_argument("--id", required=True)
     pr.add_argument("--statement", required=True)
     pr.add_argument("--derived-from", default="")
-    pr.set_defaults(fn=cmd_principle)
+    pr.set_defaults(writes=True, fn=cmd_principle)
 
     tg = sub.add_parser("tag", help="list the tag vocabulary, or change this project's tags")
     tg.add_argument("--project", default=".")
@@ -1351,7 +1572,7 @@ def main(argv=None) -> int:
                     help="confirm a tag resembling an existing one really means something else")
     tg.add_argument("--merge", default="", help="retag every project carrying this tag")
     tg.add_argument("--into", default="", help="the tag --merge should fold into")
-    tg.set_defaults(fn=cmd_tag)
+    tg.set_defaults(writes=True, fn=cmd_tag)
 
     rg = sub.add_parser("regret",
                         help="mark a repeated choice as a mistake, inverting its precedent")
@@ -1360,35 +1581,45 @@ def main(argv=None) -> int:
     rg.add_argument("--because", required=True, help="what went wrong — the lesson")
     rg.add_argument("--instead", default="", help="what you would choose now")
     rg.add_argument("--id", default="")
-    rg.set_defaults(fn=cmd_regret)
+    rg.set_defaults(writes=True, fn=cmd_regret)
 
     m = sub.add_parser("maintain", help="contradictions, dead projects, orphans, counts")
     m.add_argument("--apply", action="store_true", help="perform the safe cleanups")
+    # `writes` is derived from --apply in main(): without it maintain only reports.
     m.set_defaults(fn=cmd_maintain)
 
-    sub.add_parser("rebuild", help="replay journal.jsonl into a fresh graph").set_defaults(fn=cmd_rebuild)
+    sub.add_parser("rebuild", help="replay journal.jsonl into a fresh graph"
+                   ).set_defaults(writes=True, fn=cmd_rebuild)
 
     it = sub.add_parser("init", help="show where the store lives, or move it elsewhere")
     it.add_argument("location", nargs="?",
                     help="directory to keep the store in; the default path is symlinked at it")
-    it.set_defaults(fn=cmd_init)
+    it.set_defaults(writes=True, fn=cmd_init)
 
     cy = sub.add_parser("cypher", help="escape hatch")
     cy.add_argument("query")
     cy.add_argument("--params", default="")
-    cy.set_defaults(fn=cmd_cypher)
+    # A writer, though it usually reads: the query is arbitrary text, so
+    # `cypher "CREATE (...)"` cannot be told from a MATCH before it runs.
+    # Serialising a rare interactive escape hatch is the cheap side of that.
+    cy.set_defaults(writes=True, fn=cmd_cypher)
 
     ex = sub.add_parser("export", help="snapshot the graph for grafeo-server and its web UI")
     ex.add_argument("--out", help="where to write the snapshot (default: <store>/export)")
-    ex.set_defaults(fn=cmd_export)
+    ex.set_defaults(writes=False, fn=cmd_export)
 
-    sub.add_parser("selftest").set_defaults(fn=cmd_selftest)
+    sub.add_parser("selftest").set_defaults(writes=True, fn=cmd_selftest)
 
     a = p.parse_args(argv)
     if a.cmd == "init":
         cmd_init(a)
         return 0
-    with Store(pathlib.Path(a.home)) as s:
+    if a.cmd == "maintain":
+        # --apply deletes orphan nodes; without it maintain only reports.
+        # Resolved here, before the Store exists, because it must be a choice
+        # of mode: a read lock can never be upgraded to a write lock.
+        a.writes = bool(a.apply)
+    with Store(pathlib.Path(a.home), write=a.writes) as s:
         a.fn(a, s)
     return 0
 
