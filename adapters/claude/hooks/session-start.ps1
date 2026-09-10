@@ -17,10 +17,23 @@ if ($IsWindows -eq $false) { exit 0 }
 
 $ErrorActionPreference = 'SilentlyContinue'
 
-# Resolve the CLI relative to this script, not an assumed install path.
+# Resolve the CLI relative to this script, not an assumed install path. Two
+# channels lay it out differently — see the same block in session-start.sh:
+#
+#   repository / Claude Code plugin  adapters/claude/hooks/  -> ..\..\..\scripts\
+#   acr realize                      .claude\hooks\<pkg>\    -> ..\..\scripts\<pkg>\
+#
+# The ACR directory carries the package name, so its sibling is discovered
+# rather than spelled out. Get-ChildItem -Directory is PowerShell 3.0+, so it
+# is available under the 5.1 fallback this script still has to run on.
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
-$dg = Join-Path $here '..\..\..\scripts\precedent.py'
-if (-not (Test-Path $dg)) { exit 0 }
+$candidates = @(Join-Path $here '..\..\..\scripts\precedent.py')
+$candidates += Get-ChildItem -Path (Join-Path $here '..\..\scripts') -Directory `
+    -ErrorAction SilentlyContinue | ForEach-Object {
+        Join-Path $_.FullName 'precedent.py'
+    }
+$dg = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+if (-not $dg) { exit 0 }
 if (-not (Get-Command uv -ErrorAction SilentlyContinue)) { exit 0 }
 
 $brief = (& uv run --quiet $dg brief --project $PWD --only-if-relevant 2>$null) -join "`n"

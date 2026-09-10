@@ -127,10 +127,23 @@ is absent).
 
 [ACR](https://github.com/jbaruch/agentic-context-registry) is the only channel that reaches
 Codex and Cursor. It is driven by `agent-plugin.yaml`, which ships the skill, the CLI script
-and the session-start hook. ACR's v1 schema has no `commands` artifact class, so the 9 slash
-commands under Commands cannot be expressed this way. Codex and Cursor users get the skill
-and the script, without the commands. Point ACR at this repo's `agent-plugin.yaml`; see
-ACR's own docs for the current install invocation.
+and the session-start hook:
+
+```bash
+acr install github:asm0dey/precedent --agent claude-code   # or codex, or cursor
+acr realize
+```
+
+`install` resolves the latest GitHub release, so a release has to exist. The skill artifact
+is the `adapters/claude` directory, which is also the plugin root the Claude Code channel
+uses, so the whole adapter travels: `SKILL.md`, `hooks/` and `commands/`.
+
+The commands ride along as files without being wired up. ACR's v1 schema has no `commands`
+artifact class, and `realize` puts the skill under
+`.claude/skills/acr__asm0dey__precedent__precedent/`, so the 9 command files land at
+`commands/` *inside that skill directory*, where Claude Code does not look for them. Codex
+and Cursor users get the skill, the CLI and the hook; the slash commands stay a Claude Code
+plugin feature until ACR grows an artifact class for them.
 
 ACR's `hookArtifact` takes exactly one path per hook entry, and this manifest declares only
 `adapters/claude/hooks/session-start.sh`, a POSIX shell script. A second entry pointing at

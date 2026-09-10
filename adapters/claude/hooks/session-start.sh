@@ -4,12 +4,22 @@
 set -uo pipefail
 
 # Resolve the CLI relative to this script rather than assuming an install
-# path: this file now ships under adapters/claude/ and is installed by at
-# least two channels (Claude Code plugin, ACR) that put it in different
-# places. ../../../scripts/precedent.py from here is the repository layout.
+# path: this file ships under adapters/claude/ and is installed by two
+# channels that lay it out differently.
+#
+#   repository / Claude Code plugin  adapters/claude/hooks/  -> ../../../scripts/
+#   acr realize                      .claude/hooks/<pkg>/    -> ../../scripts/<pkg>/
+#
+# The ACR directory names carry the package name, so the sibling cannot be
+# spelled out; the glob finds it whatever the package is called. A glob that
+# matches nothing stays literal, and the `-f` test then rejects it.
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
-DG="$HERE/../../../scripts/precedent.py"
-[ -f "$DG" ] || exit 0
+DG=""
+for candidate in "$HERE/../../../scripts/precedent.py" \
+                 "$HERE"/../../scripts/*/precedent.py; do
+  [ -f "$candidate" ] && { DG="$candidate"; break; }
+done
+[ -n "$DG" ] || exit 0
 command -v uv >/dev/null 2>&1 || exit 0
 
 # --only-if-relevant prints nothing when this directory has no decisions and no

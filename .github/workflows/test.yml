@@ -48,6 +48,15 @@ jobs:
         # to `git` in each one's directory (see identity_gaps() in
         # scripts/precedent.py).
         run: uv run scripts/precedent.py --home "${RUNNER_TEMP}/precedent-ci" selftest
+      - name: hook finds the CLI in every install layout
+        shell: bash
+        # The hook fails closed: it exits 0 and prints nothing when it cannot
+        # resolve the CLI, so an exit-code assertion cannot tell a working
+        # hook from a mislocated one. This seeds a store and requires the
+        # brief to actually appear, in the repository layout and in the one
+        # `acr realize` writes.
+        run: bash tests/hook-finds-cli.sh
+
       - name: windows hook adapter runs clean
         if: matrix.os == 'windows-latest'
         shell: pwsh
