@@ -201,6 +201,61 @@ NOISE = {"node_modules", "__pycache__", "venv", "target", "build", "dist",
 LISTING_CAP = 24
 
 
+def normalise_remote(url: str) -> str | None:
+    """Reduce any shape git hands back to `host/owner/repo`.
+
+    Lowercased so two clones agree. That loses case on a local-path remote,
+    which is an acceptable trade for an identity that has to match across
+    machines.
+    """
+    url = url.strip()
+    if not url:
+        return None
+    url = re.sub(r"^[A-Za-z][A-Za-z0-9+.-]*://", "", url)   # https:// ssh:// git://
+    url = re.sub(r"^[^/@]*@", "", url)                       # git@ or user:token@
+    host, sep, path = url.partition("/")
+    if ":" in host:
+        host, _, extra = host.partition(":")
+        if not extra.isdigit():                              # scp-style host:owner/repo
+            path = f"{extra}/{path}" if sep else extra
+    url = f"{host}/{path}".rstrip("/") if path else host
+    if url.endswith(".git"):
+        url = url[:-4]
+    return url.lower() or None
+
+
+def portable_id(root: pathlib.Path) -> str | None:
+    """The identity that survives a machine, a clone location and an OS.
+
+    None is a fine answer — a project with no remote is correctly
+    machine-local. A guessed id is not: it silently merges the histories of
+    two unrelated projects, which is the failure a wrong tag causes.
+    """
+    import subprocess
+
+    def git(*args: str) -> str | None:
+        try:
+            r = subprocess.run(["git", "-C", str(root), *args],
+                               capture_output=True, text=True, timeout=5)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return r.stdout.strip() if r.returncode == 0 else None
+
+    remote = normalise_remote(git("remote", "get-url", "origin") or "")
+    if not remote:
+        return None
+    top = git("rev-parse", "--show-toplevel")
+    if not top:
+        return remote
+    try:
+        sub = root.resolve().relative_to(pathlib.Path(top).resolve())
+    except ValueError:
+        return remote
+    # as_posix keeps the key identical on Windows; a backslash here would
+    # split the graph exactly the way the native path already does.
+    return remote if str(sub) == "." else f"{remote}#/{sub.as_posix()}"
+
+
 def detect_project(root: pathlib.Path) -> dict:
     """Identify a project and show what is in it, without guessing its kind.
 
@@ -1958,6 +2013,37 @@ def _check_maintain(s: Store) -> None:
                      AND NOT EXISTS { MATCH (n)<--() } DETACH DELETE n""", {"name": name})
 
 
+def _check_identity(s: Store) -> None:
+    """A home-relative id was rejected: /home/u/src/api and C:\\dev\\api are the
+    same repo at different relative paths, and two different projects can sit
+    at the same relative path on two machines. The remote is the identity.
+    """
+    for raw, want in [
+        ("https://github.com/asm0dey/precedent.git", "github.com/asm0dey/precedent"),
+        ("git@github.com:asm0dey/precedent.git", "github.com/asm0dey/precedent"),
+        ("ssh://git@github.com/asm0dey/precedent.git", "github.com/asm0dey/precedent"),
+        ("https://user:token@github.com/o/r.git", "github.com/o/r"),
+        ("ssh://git@host:2222/o/r.git", "host/o/r"),
+        ("https://GitHub.com/Asm0dey/Precedent", "github.com/asm0dey/precedent"),
+        ("", None),
+    ]:
+        assert normalise_remote(raw) == want, f"{raw!r} -> {normalise_remote(raw)!r}"
+
+    import subprocess
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp) / "repo"
+        (root / "mod").mkdir(parents=True)
+        run = lambda *a: subprocess.run(["git", "-C", str(root), *a],
+                                        capture_output=True, check=True)
+        assert portable_id(root) is None, "no git dir yet"
+        run("init", "-q")
+        assert portable_id(root) is None, "a repo with no origin has no portable id"
+        run("remote", "add", "origin", "git@github.com:asm0dey/precedent.git")
+        assert portable_id(root) == "github.com/asm0dey/precedent"
+        assert portable_id(root / "mod") == "github.com/asm0dey/precedent#/mod"
+
+
 def cmd_selftest(a, s: Store) -> None:
     """One runnable check over the paths that contain real logic.
 
@@ -1978,6 +2064,7 @@ def cmd_selftest(a, s: Store) -> None:
     _check_grafeo_readers()
     _check_verdicts(s)
     _check_maintain(s)
+    _check_identity(s)
     after = s.q("MATCH (n) RETURN count(n) AS n")[0]["n"]
     assert after == before, f"selftest changed node count {before} -> {after}"
     print(f"selftest ok ({before} nodes, unchanged)")
