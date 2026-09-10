@@ -717,13 +717,18 @@ def cmd_check(a, s: Store) -> None:
                   RETURN o.name AS other, count(DISTINCT p) AS n,
                          collect(d.created) AS dates
                   ORDER BY n DESC LIMIT 3""", {"t": topic, "o": a.chose})
-    ack = s.q("""MATCH (d:Decision)-[:ABOUT]->(:Topic {name:$t}),
-                       (d)-[:IN_PROJECT]->(:Project {id:$pid})
-                 WHERE d.status='active' AND d.despite IS NOT NULL
-                 RETURN d.despite AS why, d.title AS title""",
-              {"t": topic, "pid": str(pathlib.Path(a.project).resolve())})
     diverged = [r for r in norm if r["n"] >= 2]
     for r in diverged:
+        # Scoped to THIS norm: the exception was argued out against a specific
+        # prior decision, and letting it answer every warning on the topic is
+        # how one acknowledged divergence hides three unacknowledged ones.
+        ack = s.q("""MATCH (d:Decision)-[:ABOUT]->(:Topic {name:$t}),
+                           (d)-[:IN_PROJECT]->(:Project {id:$pid}),
+                           (d)-[:DIVERGES_FROM]->(:Decision)-[:CHOSE]->(:Option {name:$other})
+                     WHERE d.status='active' AND d.despite IS NOT NULL
+                     RETURN d.despite AS why LIMIT 1""",
+                  {"t": topic, "pid": str(pathlib.Path(a.project).resolve()),
+                   "other": r["other"]})
         # A count with no date weighs a choice from 2019 in a dead repo exactly
         # as heavily as one from last month. The reader can discount it; the
         # tool should not decide the history expired.
@@ -1776,14 +1781,41 @@ def _check_verdicts(s: Store) -> None:
         div = out2.getvalue()
         assert "DIVERGENCE" in div, div
         assert f"last: {today()[:7]}" in div, f"the norm must carry its age:\n{div}"
+
+        # Two norms on one topic: mongo (2 projects) and cassandra (2 projects).
+        # The exception is recorded against the mongo one only, so the
+        # cassandra warning must still fire unacknowledged.
+        for n, pid in (("selftest-v4", "/tmp/precedent-selftest-v4"),
+                       ("selftest-v5", "/tmp/precedent-selftest-v5")):
+            write_decision(s, {**base, "id": n, "chose": ["cassandra"],
+                               "rejected": [], "supersedes": [],
+                               "project_id": pid, "project_name": n})
+        write_decision(s, {**base, "id": "selftest-v6", "chose": ["sqlite"],
+                           "rejected": [], "supersedes": [],
+                           "despite": "single user, no concurrency",
+                           "diverges_from": ["selftest-v2"],
+                           "project_id": "/tmp", "project_name": "here"})
+        out3 = io.StringIO()
+        with contextlib.redirect_stdout(out3):
+            cmd_check(_argparse.Namespace(topic="selftest-persistence",
+                                          chose="sqlite", project="/tmp"), s)
+        scoped = out3.getvalue()
+        warnings = [l for l in scoped.splitlines() if "DIVERGENCE" in l]
+        mongo = [l for l in warnings if "mongo" in l]
+        cass = [l for l in warnings if "cassandra" in l]
+        assert mongo and "acknowledged here" in mongo[0], f"{warnings}"
+        assert cass and "acknowledged here" not in cass[0], \
+            f"an unrelated norm must not be reported as acknowledged: {cass}"
     finally:
         s.q("MATCH (l:Lesson {id:'selftest-v-lesson'}) DETACH DELETE l")
         s.q("MATCH (l:Lesson {id:'selftest-v-lesson-other'}) DETACH DELETE l")
         s.q("MATCH (n) WHERE n.id STARTS WITH 'selftest-v' DETACH DELETE n")
-        for pid in ("/tmp/precedent-selftest-v2", "/tmp/precedent-selftest-v3"):
+        for pid in ("/tmp/precedent-selftest-v2", "/tmp/precedent-selftest-v3",
+                    "/tmp/precedent-selftest-v4", "/tmp/precedent-selftest-v5", "/tmp"):
             s.q("MATCH (p:Project {id:$id}) DETACH DELETE p", {"id": pid})
         for name in ("selftest-persistence", "selftest-v-other-topic",
-                      "mongo", "postgres", "sqlite", "mysql", "selftest-v-tag"):
+                      "mongo", "postgres", "sqlite", "mysql", "cassandra",
+                      "selftest-v-tag"):
             s.q("""MATCH (n) WHERE (n:Topic OR n:Option OR n:Tag) AND n.name = $name
                      AND NOT EXISTS { MATCH (n)<--() } DETACH DELETE n""", {"name": name})
 
