@@ -1740,6 +1740,13 @@ def _check_verdicts(s: Store) -> None:
     import contextlib
     import io
 
+    # Resolve once and reuse for both the stored project id and every CLI
+    # argument in this block. On macOS /tmp is a symlink to /private/tmp, so
+    # a literal "/tmp" node id would never match pathlib.Path("/tmp").resolve()
+    # inside cmd_check's ack lookup — resolving here keeps both sides in
+    # agreement on whatever path the platform's real temp dir resolves to.
+    here = str(pathlib.Path("/tmp").resolve())
+
     base = {"title": "T", "statement": "T", "rationale": "flexible schema",
             "scope": "architecture", "created": today(),
             "tags": ["selftest-v-tag"], "topics": ["selftest-persistence"],
@@ -1761,7 +1768,7 @@ def _check_verdicts(s: Store) -> None:
     try:
         out = io.StringIO()
         args = _argparse.Namespace(topic="selftest-persistence",
-                                   chose="postgres", project="/tmp")
+                                   chose="postgres", project=here)
         with contextlib.redirect_stdout(out):
             cmd_check(args, s)
         text = out.getvalue()
@@ -1774,7 +1781,7 @@ def _check_verdicts(s: Store) -> None:
 
         out2 = io.StringIO()
         args2 = _argparse.Namespace(topic="selftest-persistence",
-                                    chose="sqlite", project="/tmp")
+                                    chose="sqlite", project=here)
         s.q("MATCH (d:Decision) WHERE d.id STARTS WITH 'selftest-v' SET d.status='active'")
         with contextlib.redirect_stdout(out2):
             cmd_check(args2, s)
@@ -1794,11 +1801,11 @@ def _check_verdicts(s: Store) -> None:
                            "rejected": [], "supersedes": [],
                            "despite": "single user, no concurrency",
                            "diverges_from": ["selftest-v2"],
-                           "project_id": "/tmp", "project_name": "here"})
+                           "project_id": here, "project_name": "here"})
         out3 = io.StringIO()
         with contextlib.redirect_stdout(out3):
             cmd_check(_argparse.Namespace(topic="selftest-persistence",
-                                          chose="sqlite", project="/tmp"), s)
+                                          chose="sqlite", project=here), s)
         scoped = out3.getvalue()
         warnings = [l for l in scoped.splitlines() if "DIVERGENCE" in l]
         mongo = [l for l in warnings if "mongo" in l]
@@ -1811,7 +1818,7 @@ def _check_verdicts(s: Store) -> None:
         s.q("MATCH (l:Lesson {id:'selftest-v-lesson-other'}) DETACH DELETE l")
         s.q("MATCH (n) WHERE n.id STARTS WITH 'selftest-v' DETACH DELETE n")
         for pid in ("/tmp/precedent-selftest-v2", "/tmp/precedent-selftest-v3",
-                    "/tmp/precedent-selftest-v4", "/tmp/precedent-selftest-v5", "/tmp"):
+                    "/tmp/precedent-selftest-v4", "/tmp/precedent-selftest-v5", here):
             s.q("MATCH (p:Project {id:$id}) DETACH DELETE p", {"id": pid})
         for name in ("selftest-persistence", "selftest-v-other-topic",
                       "mongo", "postgres", "sqlite", "mysql", "cassandra",
