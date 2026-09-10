@@ -53,11 +53,25 @@ def resolve_home(home: pathlib.Path) -> pathlib.Path:
 
     Exactly one hop: a pointer found inside the target is a stale file, not
     an instruction, and following it is how a relocation loop starts.
+
+    A pointer that is empty, truncated, or otherwise not one absolute path is
+    refused rather than followed: write_text is not atomic, so a process
+    killed mid-write leaves exactly this on disk, and Path("").expanduser()
+    is Path(".") — silently redirecting every later command to whatever the
+    current directory happens to be is the wrong failure for the one function
+    whose job is finding the only copy of the journal.
     """
     pointer = home / POINTER
     if not pointer.is_file():
         return home
-    return pathlib.Path(pointer.read_text().strip()).expanduser()
+    content = pointer.read_text().strip()
+    target = pathlib.Path(content).expanduser() if content else None
+    if not content or not target.is_absolute():
+        raise SystemExit(
+            f"error: {pointer} does not hold a usable path (contents: {content!r}). "
+            "It should contain exactly one absolute path, written by `init --location`. "
+            "Fix or delete it by hand, then retry.")
+    return target
 
 
 class Store:
@@ -978,6 +992,30 @@ def replay_entry(s: Store, e: dict) -> None:
         raise ValueError(f"unknown journal op {e.get('op')!r}")
 
 
+def _ensure_removable(path: pathlib.Path) -> None:
+    """Raise if this process cannot delete `path` (file or directory tree).
+
+    Checked before relocate() moves anything, not caught mid-move: a real
+    store here can hold root-owned directories (left by an earlier
+    docker-mounted grafeo-server run, store bind-mounted), and a
+    PermissionError partway through the move loop would strand payload split
+    across both directories with no pointer written — after which
+    resolve_home(default) keeps quietly resolving to default, masking
+    whatever already moved.
+
+    TOCTOU: permissions can still change between this check and the actual
+    move. Accepted as the cheap tradeoff for not owning a staging-directory
+    and rollback file mover.
+    """
+    if path.is_dir() and not path.is_symlink():
+        if not os.access(path, os.W_OK):
+            raise SystemExit(
+                f"cannot relocate: {path} is not writable by this process; "
+                "fix its permissions or move it aside by hand, then retry.")
+        for child in path.iterdir():
+            _ensure_removable(child)
+
+
 def relocate(target: pathlib.Path, default: pathlib.Path = DEFAULT_HOME) -> str:
     """Keep the store somewhere else, and leave a pointer at the default path."""
     import shutil
@@ -986,11 +1024,17 @@ def relocate(target: pathlib.Path, default: pathlib.Path = DEFAULT_HOME) -> str:
     if target == default:
         return f"store: {target}  (the default location)"
 
+    if default.exists() and not default.is_dir():
+        raise SystemExit(f"{default} exists and is not a directory; move it aside first")
     default.mkdir(parents=True, exist_ok=True)
+    # Prefix match, not exact equality: filelock's SQLite backend produces no
+    # sidecars today (checked under a held write lock, a held read lock, and
+    # after close), but a future filelock that switches to WAL would, and
+    # this survives that without another look here.
     payload = [f for f in default.iterdir()
-               if f.name not in (".lock", POINTER)]
+               if not f.name.startswith(".lock") and f.name != POINTER]
     occupied = [f for f in target.iterdir()
-                if f.name not in (".lock", POINTER)]
+                if not f.name.startswith(".lock") and f.name != POINTER]
     if payload and occupied:
         raise SystemExit(
             f"both {default} and {target} hold a store; refusing to merge.\n"
@@ -998,6 +1042,11 @@ def relocate(target: pathlib.Path, default: pathlib.Path = DEFAULT_HOME) -> str:
             f"    cat {default}/journal.jsonl >> {target}/journal.jsonl\n"
             f"    mv {default} {default}.bak\n"
             f"  then re-run this, and `precedent.py rebuild`.")
+    if payload and not os.access(default, os.W_OK):
+        raise SystemExit(f"cannot relocate: {default} is not writable by this process; "
+                          "fix its permissions, then retry.")
+    for f in payload:
+        _ensure_removable(f)
     for f in payload:
         shutil.move(str(f), str(target / f.name))
     (default / POINTER).write_text(str(target) + "\n")
@@ -1022,6 +1071,18 @@ def cmd_init(a) -> None:
                   " which overrides the above for this shell only —"
                   " the SessionStart hook will not see it.")
         return
+    # relocate() always acts on DEFAULT_HOME, never on --home: the
+    # SessionStart hook and every slash command are wired to the default
+    # path with no flag in between, so a --home that points elsewhere would
+    # otherwise relocate a store this invocation was never told about.
+    home_arg = pathlib.Path(a.home).resolve()
+    if home_arg != DEFAULT_HOME.resolve():
+        raise SystemExit(
+            f"error: --home {home_arg} was given, but `init --location` always "
+            f"relocates the default location ({DEFAULT_HOME}), because that is "
+            "the path the SessionStart hook and every slash command are wired "
+            "to — not --home. Re-run without --home to relocate the store this "
+            "machine actually uses by default.")
     print(relocate(pathlib.Path(a.location).expanduser().resolve()))
 
 
@@ -1204,6 +1265,7 @@ def _check_relocate() -> None:
     _sh.rmtree(base, ignore_errors=True)
     dflt, tgt = base / "default", base / "elsewhere"
     relocate(tgt, dflt)
+    assert (dflt / POINTER).read_text().strip() == str(tgt), "fresh default must get a pointer"
 
     _sh.rmtree(base); dflt.mkdir(parents=True)
     (dflt / "journal.jsonl").write_text("x\n"); (dflt / ".lock").write_text("")
