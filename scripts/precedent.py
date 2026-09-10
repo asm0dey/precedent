@@ -160,7 +160,39 @@ class Store:
         return False
 
     def q(self, cypher: str, params: dict | None = None) -> list[dict]:
-        return list(self.db.execute(cypher, params) if params else self.db.execute(cypher))
+        # Writers run every statement inside a grafeo transaction. Not for
+        # concurrency between processes — that is entirely the file lock's
+        # job, see __init__ — but because grafeo's WAL records ONE PROPERTY
+        # PER RECORD: `SET n.a=$i, n.b=$i` is one Cypher statement but two
+        # WalRecord::SetNodeProperty entries. With no transaction there is no
+        # commit boundary joining those two records, so a *reader* process
+        # that opens the db between them (which the shared read lock
+        # explicitly allows to happen concurrently with a writer) can observe
+        # the new `a` alongside the stale `b` — a torn write. Measured on
+        # macOS (4 readers x 4s per cell): bare writer + bare reader = 755
+        # reads, 16 torn; writer in a transaction = 0 torn; reader in a
+        # transaction = 0 torn; both = 0 torn. Reproduced on Windows too;
+        # Linux did not tear in this measurement (see _check_grafeo_readers'
+        # docstring). grafeo's begin_transaction docs promise "snapshot
+        # isolation — all queries within the transaction see a consistent
+        # view" and an epoch that "increments with each committed
+        # transaction" — exactly the missing atomicity boundary.
+        #
+        # Do NOT read this as "transactions replace the lock." Measured on
+        # Linux, 6 processes x 20 writes each (120 expected, no lock held):
+        # bare = 40 stored, in-transaction = 48 stored, "serializable" = 20
+        # stored — all three exit 0 and raise nothing, i.e. silent loss in
+        # every case. Only this class's filelock (ReadWriteLock, see
+        # __init__) got all 120 stored. Never use "serializable" here — it
+        # lost the most of the three. The transaction below buys atomic
+        # visibility of a single multi-property statement to a concurrent
+        # reader; it buys nothing against a second concurrent writer.
+        if not self.write:
+            return list(self.db.execute(cypher, params) if params else self.db.execute(cypher))
+        with self.db.begin_transaction() as tx:
+            rows = list(tx.execute(cypher, params) if params else tx.execute(cypher))
+            tx.commit()
+        return rows
 
     def log(self, op: str, payload: dict) -> None:
         """Journal first, then mutate. A crash between the two costs a replay, not data."""
@@ -1953,6 +1985,21 @@ def _check_grafeo_readers() -> None:
     a writer process loops writes whose two properties must always agree, and
     readers assert they never see a row where they disagree.
 
+    This check caught a real tear, not just a hypothetical one: `MERGE ... SET
+    n.a=$i, n.b=$i` is one Cypher statement but grafeo's WAL records ONE
+    PROPERTY PER RECORD (`WalRecord::SetNodeProperty`), so a bare (untransacted)
+    writer produces two separate WAL records per iteration with no commit
+    boundary joining them. On CI this teared on macos-latest and
+    windows-latest but not ubuntu-latest — measured locally (4 readers x 4s
+    per cell, macOS): bare writer + bare reader = 755 reads, 16 torn; writer
+    in a transaction = 0 torn; reader in a transaction = 0 torn; both = 0
+    torn. A transaction on either side is sufficient; this harness puts one on
+    the writer because that is what `Store.q()` now does for every write in
+    precedent proper (see its comment) — the writer here models precedent's
+    actual write path, not a synthetic best case. Readers stay bare: they are
+    still testing what an unlocked, non-transactional reader observes, which
+    is the harder case the read lock relies on.
+
     Deliberately unlocked, and deliberately harsher than production.
     ReadWriteLock grants N readers OR one exclusive writer, so under the lock
     a reader and a writer are never concurrent; this runs them concurrently
@@ -2004,8 +2051,10 @@ def _check_grafeo_readers() -> None:
         "i = 0\n"
         "while time.monotonic() < end:\n"
         "    i += 1\n"
-        "    list(g.execute(\"MERGE (n:RWProbe {id:'p'}) SET n.a=$i, n.b=$i "
+        "    with g.begin_transaction() as tx:\n"
+        "        list(tx.execute(\"MERGE (n:RWProbe {id:'p'}) SET n.a=$i, n.b=$i "
         "RETURN n.a AS a\", {\"i\": i}))\n"
+        "        tx.commit()\n"
         "g.close()\n")
 
     reader_src = (
