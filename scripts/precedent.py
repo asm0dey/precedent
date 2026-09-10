@@ -1424,6 +1424,19 @@ def _check_helpers() -> None:
     assert slug("Use Postgres, not Mongo!") == "use-postgres-not-mongo"
     assert csv(" a, b ,,c ") == ["a", "b", "c"]
 
+    # The POSIX-only locking module this CLI used to import at module scope,
+    # which made `--help` itself fail on Windows (spec A4). The name is
+    # assembled rather than written out because it must not appear in this
+    # file at all — spelled the obvious way, the assertion would match itself
+    # and could never fail. This is the durable form of what was a one-off
+    # grep during the port.
+    banned = "f" + "cntl"
+    # encoding pinned: this file is full of non-ASCII prose and read_text()
+    # defaults to the locale codepage, which raises on a Windows console.
+    assert banned not in pathlib.Path(__file__).read_text(encoding="utf-8"), (
+        f"{banned} does not exist on Windows and this CLI must start there;"
+        " filelock is already a dependency and is the cross-platform answer.")
+
 
 def _check_detect_project() -> None:
     assert detect_project(pathlib.Path("/nonexistent"))["contents"] == ""
@@ -1873,14 +1886,17 @@ def _check_grafeo_readers() -> None:
     import subprocess
     import tempfile
 
-    WRITE_BUDGET = 3.0   # wall clock, not iterations, so the run is bounded
+    WRITE_BUDGET = 10.0  # wall clock, not iterations, so the run is bounded
     READ_BUDGET = 1.2    # ends inside the writer's window, from both sides
     WARMUP = 0.4         # let the node exist before readers look for it
     READERS = 4          # several appenders on one WAL, not just a pair
     STUCK = 5.0          # a reader past this is wedged, not slow
     # WRITE_BUDGET is an upper bound nothing waits on: the writer is killed as
     # soon as the readers are reaped, so raising it costs no wall clock and
-    # only widens the margin behind the `writer.poll()` assertion below.
+    # only widens the margin behind the `writer.poll()` assertion below. At
+    # 3.0 the margin behind that assertion was ~1.4s, which four cold
+    # Python+grafeo process starts can eat on a loaded machine and Windows
+    # process spawn eats comfortably. Since the budget is free, it is 10.
 
     writer_src = (
         "import sys, time, grafeo\n"
@@ -2303,6 +2319,16 @@ def _check_identity(s: Store) -> None:
     ]:
         assert normalise_remote(raw) == want, f"{raw!r} -> {normalise_remote(raw)!r}"
 
+    # …and the direction that cannot be undone. Convergence that goes too far
+    # merges two unrelated histories onto one node, and the journal is
+    # append-only, so a wrong merge cannot be edited back out. Same shape as
+    # _check_drift's false-match list.
+    for a_, b_ in [("https://github.com/o/r.git", "https://gitlab.com/o/r.git"),
+                   ("git@github.com:o/r.git", "git@github.com:o/r2.git"),
+                   ("git@github.com:o/r.git", "git@github.com:o2/r.git")]:
+        assert normalise_remote(a_) != normalise_remote(b_), \
+            f"distinct remotes collapsed: {a_} ~ {b_} -> {normalise_remote(a_)!r}"
+
     import subprocess
     import tempfile
     with tempfile.TemporaryDirectory() as tmp:
@@ -2322,7 +2348,9 @@ def _check_identity(s: Store) -> None:
     # while writes create a second one, fragmenting the graph a little more
     # with every machine and every session, invisibly.
     linux, windows = "/tmp/precedent-selftest-i", "C:\\dev\\precedent-selftest-i"
+    unrelated = "/tmp/precedent-selftest-i-other"
     pp = "github.com/asm0dey/selftest-i"
+    pp2 = "github.com/asm0dey/selftest-i-other"
     try:
         a_info = upsert_project(s, {"id": linux, "path": linux, "name": "i",
                                     "portable": pp})
@@ -2334,9 +2362,27 @@ def _check_identity(s: Store) -> None:
                    {"pp": pp}) == [{"n": 1}], "one repo, one node"
         row = s.q("MATCH (p:Project {id:$id}) RETURN p.paths AS paths", {"id": linux})[0]
         assert set(paths_of(row)) == {linux, windows}, row
+
+        # The other direction, and the one that cannot be undone: convergence
+        # is worth nine assertions above, but a resolver that over-converged
+        # would fold two unrelated repos into one node and merge their
+        # histories in an append-only store. A different remote must key a
+        # different node even when everything else about the sighting matches
+        # — same name, sibling path, same session.
+        c_info = upsert_project(s, {"id": unrelated, "path": unrelated, "name": "i",
+                                    "portable": pp2})
+        assert c_info["id"] == unrelated, \
+            "a different remote must not resolve onto another repo's node"
+        assert set(paths_of(s.q("MATCH (p:Project {id:$id}) RETURN p.paths AS paths",
+                                {"id": unrelated})[0])) == {unrelated}, \
+            "a distinct repo must not inherit the other one's paths"
+        assert s.q("MATCH (p:Project {portable:$pp}) RETURN count(p) AS n",
+                   {"pp": pp}) == [{"n": 1}], "two repos, two nodes"
+        assert s.q("MATCH (p:Project) WHERE p.portable IN $pps RETURN count(p) AS n",
+                   {"pps": [pp, pp2]}) == [{"n": 2}], "two repos, two nodes"
     finally:
-        s.q("MATCH (p:Project {id:$id}) DETACH DELETE p", {"id": linux})
-        s.q("MATCH (p:Project {id:$id}) DETACH DELETE p", {"id": windows})
+        for pid in (linux, windows, unrelated):
+            s.q("MATCH (p:Project {id:$id}) DETACH DELETE p", {"id": pid})
 
 
 def _check_backfill_replay() -> None:
