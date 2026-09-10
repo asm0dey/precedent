@@ -695,20 +695,43 @@ def worth_backfilling(s: "Store", info: dict) -> bool:
     return s.q("MATCH (d:Decision) RETURN count(d) AS n")[0]["n"] > 0
 
 
+def backfill_portable(s: Store, info: dict) -> None:
+    """Fill in a portable id that did not exist when the project was first
+    recorded — a repo that gains a remote later would otherwise stay split
+    forever. Called from `brief`, on every session start, which is the
+    cheapest place to catch this.
+
+    Writes to an EXISTING node only (`MATCH ... SET`, never `MERGE`): `brief`
+    must never create one, or a SessionStart hook would litter the graph with
+    an empty project for every directory anyone ever opens. The guard only
+    fires when the node's own `portable` reads back exactly `[{"pp": None}]`
+    — a node that is there but has never had one set; a nonexistent node
+    reads back `[]` and the guard is false there too, so this never even
+    reaches a MATCH that could theoretically race a create.
+
+    Journalled BEFORE the mutation (`Store.log`'s own rule), because the
+    graph is not the durable copy: `rebuild` replays the journal into a fresh
+    graph, and a mutation with no journal entry is invisible to it — the
+    backfill would be silently undone by the next rebuild, and a second
+    machine resolving this project's portable id would then miss the lookup
+    and fork a second node, reopening exactly the split Task 13 closed.
+    """
+    if not info["portable"]:
+        return
+    if s.q("MATCH (p:Project {id:$id}) RETURN p.portable AS pp",
+           {"id": info["id"]}) != [{"pp": None}]:
+        return
+    s.log("project_portable", {"project_id": info["id"], "portable": info["portable"]})
+    s.q("MATCH (p:Project {id:$id}) SET p.portable=$pp",
+        {"id": info["id"], "pp": info["portable"]})
+
+
 def cmd_brief(a, s: Store) -> None:
     # Writes to an existing Project node only, to backfill a portable id. Never
     # creates one: a SessionStart hook calls this in every directory the user
     # opens, and creating would litter the graph with empty projects.
     info = project_info(s, a.project)
-
-    # brief runs on every session start, so this is the cheapest place to fill
-    # in a portable id that did not exist when the project was first recorded —
-    # a repo that gains a remote later would otherwise stay split forever.
-    # This writes to an EXISTING node only; brief must still never create one.
-    if info["portable"] and s.q("MATCH (p:Project {id:$id}) RETURN p.portable AS pp",
-                                {"id": info["id"]}) == [{"pp": None}]:
-        s.q("MATCH (p:Project {id:$id}) SET p.portable=$pp",
-            {"id": info["id"], "pp": info["portable"]})
+    backfill_portable(s, info)
 
     here = s.q("""MATCH (d:Decision)-[:IN_PROJECT]->(:Project {id:$pid})
                   OPTIONAL MATCH (d)-[:ABOUT]->(t:Topic)
@@ -1246,6 +1269,15 @@ def replay_entry(s: Store, e: dict) -> None:
         for t in e.get("remove", []):
             s.q("""MATCH (:Project {id:$id})-[r:TAGGED]->(:Tag {name:$n}) DELETE r""",
                 {"id": pid, "n": t})
+    elif e["op"] == "project_portable":
+        # MATCH, not upsert_project's MERGE: `brief` (the only writer of this
+        # op) never creates a node, and replay must preserve that — a node
+        # this line's project_id does not resolve to on this replay (an
+        # unlikely reordering, or a line replayed in isolation) is silently
+        # skipped rather than fabricated. Journal-order replay always plays
+        # the line that first created the node before this one.
+        s.q("MATCH (p:Project {id:$id}) SET p.portable=$pp",
+            {"id": e["project_id"], "pp": e["portable"]})
     elif e["op"] == "regret":
         apply_regret(s, e)
     elif e["op"] == "principle":
@@ -2186,21 +2218,21 @@ def _check_maintain(s: Store) -> None:
         clash = contradictions_in(s)
         assert len(clash) == 1 and clash[0]["topic"] == "selftest-caching", clash
         assert set(clash[0]["decisions"]) == {"selftest-m1", "selftest-m2"}, clash
+
+        # "The directory is not here" was never evidence a project is dead. It is
+        # equally consistent with an unmounted drive, another checkout, or a
+        # machine you are not sitting at — and dead projects get discounted.
+        assert liveness({"id": "/tmp", "paths": "/tmp"}) == "live"
+        assert liveness({"id": "C:\\dev\\x", "paths": "C:\\dev\\x"}) == "elsewhere"
+        assert liveness({"id": "/tmp", "paths": "/nope/x\n/tmp"}) == "live", \
+            "live if ANY known path exists"
+        assert liveness({"id": "/nope/x", "paths": "/nope/x"}) == "gone"
     finally:
         s.q("MATCH (n) WHERE n.id STARTS WITH 'selftest-m' DETACH DELETE n")
         s.q("MATCH (p:Project {id:'/tmp/precedent-selftest-m'}) DETACH DELETE p")
         for name in ("selftest-caching", "redis", "memcached", "hazelcast"):
             s.q("""MATCH (n) WHERE (n:Topic OR n:Option) AND n.name = $name
                      AND NOT EXISTS { MATCH (n)<--() } DETACH DELETE n""", {"name": name})
-
-    # "The directory is not here" was never evidence a project is dead. It is
-    # equally consistent with an unmounted drive, another checkout, or a
-    # machine you are not sitting at — and dead projects get discounted.
-    assert liveness({"id": "/tmp", "paths": "/tmp"}) == "live"
-    assert liveness({"id": "C:\\dev\\x", "paths": "C:\\dev\\x"}) == "elsewhere"
-    assert liveness({"id": "/tmp", "paths": "/nope/x\n/tmp"}) == "live", \
-        "live if ANY known path exists"
-    assert liveness({"id": "/nope/x", "paths": "/nope/x"}) == "gone"
 
 
 def _check_identity(s: Store) -> None:
@@ -2259,6 +2291,63 @@ def _check_identity(s: Store) -> None:
         s.q("MATCH (p:Project {id:$id}) DETACH DELETE p", {"id": windows})
 
 
+def _check_backfill_replay(s: Store) -> None:
+    """A backfilled portable id must survive a rebuild — Ruling 26.
+
+    graph.db is the index; journal.jsonl is the source of truth, and
+    `rebuild` replays it into a fresh graph. A mutation with no journal
+    entry is invisible to that replay and is lost the moment someone runs
+    `rebuild` — silently, since nothing about `brief` or `rebuild` fails.
+
+    This exercises replay_entry directly rather than cmd_rebuild, the way
+    _check_journal does, because rebuild deletes every node first and
+    selftest must leave the graph untouched.
+    """
+    pid = "/tmp/precedent-selftest-bp"
+    portable = "github.com/asm0dey/selftest-bp"
+    try:
+        # An existing, portable-less node — the exact shape backfill_portable
+        # requires before it will write anything.
+        upsert_project(s, {"id": pid, "path": pid, "name": "bp", "portable": None})
+        before = sum(1 for _ in open(s.journal)) if s.journal.exists() else 0
+
+        backfill_portable(s, {"id": pid, "portable": portable})
+        assert s.q("MATCH (p:Project {id:$id}) RETURN p.portable AS pp",
+                   {"id": pid}) == [{"pp": portable}]
+        lines = open(s.journal).readlines()
+        assert len(lines) == before + 1, \
+            "backfill_portable must journal exactly one line, or rebuild forgets it"
+        entry = json.loads(lines[-1])
+        assert entry["op"] == "project_portable", entry
+        assert entry["project_id"] == pid and entry["portable"] == portable, entry
+
+        # Idempotent: the node already carries a portable id now, so a second
+        # call must neither write again nor journal again.
+        backfill_portable(s, {"id": pid, "portable": portable})
+        assert sum(1 for _ in open(s.journal)) == before + 1, \
+            "backfill_portable must not re-journal once the node carries a portable id"
+
+        # Simulate the loss `rebuild` would cause without it: what a graph
+        # freshly rebuilt up to (but not including) this journal line would
+        # look like, then replay just this line.
+        s.q("MATCH (p:Project {id:$id}) SET p.portable=null", {"id": pid})
+        assert s.q("MATCH (p:Project {id:$id}) RETURN p.portable AS pp",
+                   {"id": pid}) == [{"pp": None}]
+        replay_entry(s, entry)
+        assert s.q("MATCH (p:Project {id:$id}) RETURN p.portable AS pp",
+                   {"id": pid}) == [{"pp": portable}], \
+            "a backfilled portable id must survive a replay"
+
+        # Replay must never create the node this line refers to — brief's own
+        # never-create rule extends to the journal line it writes.
+        s.q("MATCH (p:Project {id:$id}) DETACH DELETE p", {"id": pid})
+        replay_entry(s, entry)
+        assert s.q("MATCH (p:Project {id:$id}) RETURN p.id AS id", {"id": pid}) == [], \
+            "replaying a project_portable line must not create a node"
+    finally:
+        s.q("MATCH (p:Project {id:$id}) DETACH DELETE p", {"id": pid})
+
+
 def cmd_selftest(a, s: Store) -> None:
     """One runnable check over the paths that contain real logic.
 
@@ -2280,6 +2369,7 @@ def cmd_selftest(a, s: Store) -> None:
     _check_verdicts(s)
     _check_maintain(s)
     _check_identity(s)
+    _check_backfill_replay(s)
     after = s.q("MATCH (n) RETURN count(n) AS n")[0]["n"]
     assert after == before, f"selftest changed node count {before} -> {after}"
     print(f"selftest ok ({before} nodes, unchanged)")
