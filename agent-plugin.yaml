@@ -1,0 +1,19 @@
+schemaVersion: 1
+name: asm0dey/precedent
+version: 0.1.0
+description: >-
+  Remember and reuse the user's architectural, business and tooling decisions
+  across every project, in a queryable graph.
+source:
+  repository: https://github.com/asm0dey/precedent
+artifacts:
+  skills:
+    - id: precedent
+      path: adapters/claude/SKILL.md
+  scripts:
+    - id: precedent-cli
+      path: scripts/precedent.py
+  hooks:
+    - id: session-start
+      event: session-start
+      path: adapters/claude/hooks/session-start.sh
