@@ -1,0 +1,41 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  selftest:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
+      - name: selftest
+        shell: bash
+        # RUNNER_TEMP is read here via bash's own `$VAR` expansion (a real
+        # process environment variable), not GitHub's `${{ }}` expression
+        # substitution. That distinction matters on windows-latest: `${{ }}`
+        # substitutes literal text into the script BEFORE bash parses it, so
+        # a Windows path's backslashes go through bash's own escape-removal
+        # and vanish (the documented actions/runner footgun). `$RUNNER_TEMP`
+        # instead resolves at bash's runtime from the environment, so its
+        # backslashes are expansion output, never touched by quote/escape
+        # removal, and survive into argv intact. The scratch `--home` is not
+        # optional either way: a default-home `selftest` would enumerate
+        # every real Project node and shell out to `git` in each one's
+        # directory (see identity_gaps() in scripts/precedent.py).
+        run: uv run scripts/precedent.py --home "${RUNNER_TEMP}/precedent-ci" selftest
+
+  manifest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
+      - name: plugin.json is current
+        run: uv run scripts/gen-plugin-json.py --check
