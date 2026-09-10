@@ -9,10 +9,10 @@ $dg = Join-Path $here '..\..\..\scripts\precedent.py'
 if (-not (Test-Path $dg)) { exit 0 }
 if (-not (Get-Command uv -ErrorAction SilentlyContinue)) { exit 0 }
 
-$brief = & uv run --quiet $dg brief --project $PWD --only-if-relevant 2>$null
+$brief = (& uv run --quiet $dg brief --project $PWD --only-if-relevant 2>$null) -join "`n"
 if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($brief)) { exit 0 }
 
-$orders = & uv run --quiet $dg standing-orders 2>$null
+$orders = (& uv run --quiet $dg standing-orders 2>$null) -join "`n"
 if ($LASTEXITCODE -ne 0) { exit 0 }
 
 $skill = Join-Path $here '..\SKILL.md'
