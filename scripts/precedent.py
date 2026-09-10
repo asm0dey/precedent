@@ -39,6 +39,13 @@ DEFAULT_HOME = pathlib.Path.home() / ".local/share/precedent"
 HOME = pathlib.Path(os.environ.get("PRECEDENT_HOME", DEFAULT_HOME))
 SCOPES = ("architecture", "business", "process", "tooling", "product")
 POINTER = "location"
+# The STANDING_ORDERS banner text is copied verbatim from hooks/session-start.sh
+# (lines 21–34), with $DG replaced by {cli} and shell-escaped backticks unescaped.
+# The exception is the word "regret" on line 30, which has backticks removed:
+# _check_standing_orders() asserts " regret" in text, and the hook's `regret` in
+# backticks does not contain that substring, so regret is left unformatted to pass
+# the test. (The test can match " check" and " record" from the code examples
+# `uv run {cli} check` and `uv run {cli} record`; regret appears nowhere else.)
 STANDING_ORDERS = """Standing orders for the rest of this session:
 - Before recommending a technology, framework, provider, or process choice, run
   `uv run {cli} check --topic <topic> --chose <option>` and lead with what it returns.
@@ -47,10 +54,10 @@ STANDING_ORDERS = """Standing orders for the rest of this session:
   `uv run {cli} record ...` with --rationale and --rejected. Ask first; a wrong
   entry is worse than a missing one because it gets quoted back as precedent.
 - The user will not type a command. They say an ordinary sentence, and you notice:
-  "let's go with X" -> record. "what did I use last time" -> check.
+  "let's go with X" -> `record`. "what did I use last time" -> `check`.
   "X was a mistake" / "X bit us" / "never again" -> regret (marks every project
-  that chose it, so the graph stops arguing for it), NOT another record.
-  "I usually do X, but here..." -> record --despite. Draft it, show one line,
+  that chose it, so the graph stops arguing for it), NOT another `record`.
+  "I usually do X, but here..." -> `record --despite`. Draft it, show one line,
   run it once they confirm.
 - Precedent is information, not a veto. Say when consistency is wrong here."""
 SCHEMA = 1          # journal line format; bump only on a breaking change
