@@ -1,10 +1,16 @@
 ---
-description: Check the decision graph for contradictions, tag drift and dead projects
+name: precedent-maintain
+description: Check the decision graph for contradictions, tag drift and dead projects. Use when the user asks about the health of the graph, suspects duplicate tags, or wants to clean up recorded decisions.
 ---
 
+# Check the graph for problems
+
 ```bash
-uv run ~/.claude/skills/precedent/../../scripts/precedent.py maintain
+uv run <cli> maintain
 ```
+
+`<cli>` is this package's `precedent.py`; the `precedent` skill says how to
+locate it.
 
 Report what it finds. Contradictions (one project, one topic, two live answers)
 are for the user to resolve — record a new decision with `--supersedes <id>`

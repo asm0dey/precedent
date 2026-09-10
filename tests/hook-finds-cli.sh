@@ -24,17 +24,30 @@ uv run --quiet "$CLI" record --project "$PROJECT" \
 
 fail=0
 assert_primes() {  # <layout name> <path to hook>
-  local name=$1 hook=$2 out
+  local name=$1 hook=$2 out guidance
   out=$(cd "$PROJECT" && bash "$hook") || true
   if [ -z "$out" ]; then
     echo "FAIL: $name layout — hook printed nothing; it did not find the CLI" >&2
     fail=1
-  elif ! printf '%s' "$out" | grep -q "PRECEDENT"; then
+    return
+  fi
+  if ! printf '%s' "$out" | grep -q "PRECEDENT"; then
     echo "FAIL: $name layout — hook output carries no banner:" >&2
     printf '%s\n' "$out" >&2
     fail=1
+    return
+  fi
+  # A path the banner prints but that does not exist is the same class of bug
+  # as a mislocated CLI, and just as invisible: the hook still exits 0.
+  guidance=$(printf '%s' "$out" | sed -n 's/^Full guidance: //p')
+  if [ -z "$guidance" ]; then
+    echo "FAIL: $name layout — banner names no guidance file" >&2
+    fail=1
+  elif [ ! -f "$guidance" ]; then
+    echo "FAIL: $name layout — guidance path does not resolve: $guidance" >&2
+    fail=1
   else
-    echo "ok: $name layout primes"
+    echo "ok: $name layout primes, guidance resolves"
   fi
 }
 
@@ -46,9 +59,17 @@ assert_primes repository "$HOOK"
 # different package name than the real one on purpose.
 ACR="$WORK/acr-project/.claude"
 mkdir -p "$ACR/hooks/acr__someone__pkg__session-start" \
-         "$ACR/scripts/acr__someone__pkg__precedent-cli"
+         "$ACR/scripts/acr__someone__pkg__precedent-cli" \
+         "$ACR/skills/acr__someone__pkg__precedent" \
+         "$ACR/skills/acr__someone__pkg__precedent-check"
 cp "$HOOK" "$ACR/hooks/acr__someone__pkg__session-start/"
 cp "$CLI" "$ACR/scripts/acr__someone__pkg__precedent-cli/"
+cp "$ROOT/adapters/claude/skills/precedent/SKILL.md" \
+   "$ACR/skills/acr__someone__pkg__precedent/"
+# A sibling task skill, so the guidance lookup cannot pass by matching just
+# any skill directory that happens to be there.
+cp "$ROOT/adapters/claude/skills/precedent-check/SKILL.md" \
+   "$ACR/skills/acr__someone__pkg__precedent-check/"
 assert_primes acr-realized \
   "$ACR/hooks/acr__someone__pkg__session-start/session-start.sh"
 

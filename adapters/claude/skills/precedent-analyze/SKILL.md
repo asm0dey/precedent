@@ -1,25 +1,28 @@
 ---
-description: Read this project and record the decisions already visible in it
-argument-hint: "[path, defaults to cwd]"
+name: precedent-analyze
+description: Read an existing project and record the decisions already visible in it. Use for a project that predates the graph, when the user wants to backfill decisions from manifests, CI config and docs rather than from conversation.
 ---
 
-Backfill the graph from a project that predates it. The decisions were made
-already — they are sitting in the manifests, the CI config and the README, and
-nobody wrote them down anywhere they can be queried from.
+# Backfill the graph from an existing project
+
+The decisions were made already — they are sitting in the manifests, the CI
+config and the README, and nobody wrote them down anywhere they can be queried
+from. `<cli>` below is this package's `precedent.py`; the `precedent` skill says
+how to locate it.
 
 Work in this order. Do not skip to recording.
 
 **1. See what is already known.**
 
 ```bash
-uv run ~/.claude/skills/precedent/../../scripts/precedent.py brief --project ${1:-.}
+uv run <cli> brief --project <path>
 ```
 
 Everything under "decided here" is already recorded; re-recording it creates a
 second decision saying the same thing with a different id, and `maintain` will
 report the pair as a contradiction. Note the tags too — an untagged project's
-decisions surface nowhere, so tag it (`/precedent-tag`) before recording
-anything.
+decisions surface nowhere, so tag it (the `precedent-tag` skill) before
+recording anything.
 
 **2. Read the evidence.** Not just the file listing — open them:
 
@@ -63,7 +66,7 @@ option, and where the rationale came from. Let the user strike the ones that are
 noise. Then record them one at a time:
 
 ```bash
-uv run ~/.claude/skills/precedent/../../scripts/precedent.py record --project ${1:-.} \
+uv run <cli> record --project <path> \
   --title "..." --rationale "inferred from ..." --scope tooling \
   --topic "..." --chose "..." --rejected "..."
 ```
