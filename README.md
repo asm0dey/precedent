@@ -79,6 +79,7 @@ silent where the graph has nothing to say, so quiet directories cost nothing.
 | `/precedent-record` | Record a decision that was just settled |
 | `/precedent-check <topic> [option]` | Prior decisions on a topic, plus a conflict verdict |
 | `/precedent-tag [tags]` | Show or set this project's tags |
+| `/precedent-analyze` | Read an existing project and record the decisions visible in it |
 | `/precedent-suggest` | Decisions this project still owes |
 | `/precedent-diverge` | Record that this project departs from precedent, and why |
 | `/precedent-regret` | Mark a repeated choice as a mistake, inverting its precedent |
@@ -151,6 +152,20 @@ separately and they never lend each other precedent, while decisions recorded at
 ├── graph.db        Grafeo graph — a queryable index
 └── .lock           exclusive lock, held for the length of one command
 ```
+
+Keep it elsewhere — a synced folder, an encrypted volume, a private git
+checkout — with `init`. It moves an existing store to the new directory and
+symlinks the default path at it, so the hook and the slash commands keep working
+with no configuration:
+
+```bash
+uv run ~/.claude/skills/precedent/scripts/precedent.py init ~/Sync/precedent
+uv run ~/.claude/skills/precedent/scripts/precedent.py init   # where is it now?
+```
+
+Better than `PRECEDENT_HOME`, which the SessionStart hook never sees. Two
+populated stores are not merged silently: `init` stops and tells you to
+concatenate the journals and `rebuild`.
 
 The journal exists because the graph engine is young. If the graph is ever
 corrupted, `precedent.py rebuild` replays the journal into a fresh one and

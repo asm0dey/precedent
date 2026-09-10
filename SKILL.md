@@ -21,8 +21,8 @@ missing, `pip install grafeo` and run with `python`.
 
 ## Slash commands
 
-Six commands make the daily paths reachable without going through this document.
-They live in `commands/` beside this file and are symlinked into
+These commands make the daily paths reachable without going through this
+document. They live in `commands/` beside this file and are symlinked into
 `~/.claude/commands/`, so they stay versioned with the skill.
 
 | Command | Does |
@@ -31,6 +31,8 @@ They live in `commands/` beside this file and are symlinked into
 | `/precedent-record` | Record a decision that was just settled |
 | `/precedent-check <topic> [option]` | Prior decisions on a topic, plus a conflict verdict |
 | `/precedent-tag [tags]` | Show or set this project's tags |
+| `/precedent-analyze` | Read an existing project and record the decisions visible in it |
+| `/precedent-diverge` | Record that this project departs from precedent, and why |
 | `/precedent-suggest` | Decisions this project still owes |
 | `/precedent-regret` | Mark a repeated choice as a mistake, inverting its precedent |
 | `/precedent-maintain` | Contradictions, tag drift, dead projects |
@@ -403,6 +405,21 @@ remain the only mechanism for recording.
 ├── graph.db        Grafeo graph — a queryable index
 └── .lock           exclusive lock, held for the length of one command
 ```
+
+To keep it somewhere else — a synced folder, an encrypted volume, a private git
+checkout — point `init` at that directory. It moves an existing store there and
+symlinks the default path at it, so the hook and every slash command keep
+working unchanged:
+
+```bash
+uv run <skill>/scripts/precedent.py init ~/Sync/precedent
+uv run <skill>/scripts/precedent.py init          # where does it live right now?
+```
+
+Prefer this over `PRECEDENT_HOME`: the env var is not set in the SessionStart
+hook's environment, so exporting it hides the store from priming. It refuses to
+merge two populated stores — concatenating the journals and running `rebuild` is
+a deliberate act, not something a path flag should do behind your back.
 
 The journal exists because the graph engine is young (v0.5.x). If the graph is
 ever corrupted or the engine is abandoned, `precedent.py rebuild` replays the journal
