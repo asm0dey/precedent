@@ -14,7 +14,7 @@ BRIEF=$(timeout 20 uv run --quiet "$DG" brief --project "$PWD" --only-if-relevan
 [ -n "$BRIEF" ] || exit 0
 
 cat <<PRIME
-DECISION GRAPH — your recorded decisions, loaded for this session.
+PRECEDENT — your recorded decisions, loaded for this session.
 
 $BRIEF
 
