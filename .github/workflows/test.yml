@@ -97,5 +97,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v10.0.1  # no floating major tag exists; pin exact
-      - name: plugin.json is current
+      - name: plugin.json and marketplace.json are current
+        # Both are projections of agent-plugin.yaml, and the check also
+        # asserts the two adapter paths plugin.json names still exist — a
+        # rename there ships an install with no skills and no hook, and
+        # breaks nothing else.
         run: uv run scripts/gen-plugin-json.py --check

@@ -70,6 +70,82 @@ Ten skills carry this, one per path (`record`, `check`, `regret`, `diverge`, `pr
 fires from its own description, so nothing has to be typed. If you *want* to type, they are
 slash commands in Claude Code and Cursor, `$`-prefixed in Codex.
 
+## Install
+
+Requires [`uv`](https://docs.astral.sh/uv/) and Python 3.12+, and Claude Code, Codex or Cursor.
+Linux, macOS or Windows. The CLI itself has no install step: it is a PEP 723 single file, and
+`uv` fetches what it needs on first run, then reuses a cached environment. (A persistent
+virtualenv was measured and rejected. It saves 11 ms per call, both paths being dominated by the
+engine import, and costs an install step plus an environment to keep in sync.) What differs by
+agent is how the skills and the hook get in front of it.
+
+Claude Code can take either channel below; Codex and Cursor only ACR. Pick one per machine —
+both channels install the same SessionStart hook, and two of them prime every session twice.
+
+### ACR (Codex, Cursor, and Claude Code)
+
+[ACR](https://github.com/jbaruch/agentic-context-registry) is the only channel that reaches Codex
+and Cursor. It is driven by `agent-plugin.yaml`, which ships the ten skills, the CLI script and
+the session-start hook:
+
+```bash
+acr install github:asm0dey/precedent --agent claude-code   # or codex, or cursor
+acr realize
+```
+
+`install` resolves the latest GitHub release, so a release has to exist. Each of the ten skills
+is its own artifact, and `realize` writes them into the agent's own skills directory:
+`.claude/skills/`, `.codex/skills/` or `.cursor/skills/` as appropriate.
+
+All three agents read those paths, so every skill works on every agent. The realized directories
+carry an ACR prefix (`acr__asm0dey__precedent__precedent-check`), which matters only if you type
+the name: skills fire from their descriptions, and that is how they are meant to fire. Codex
+registers them under their frontmatter name regardless, so `$precedent-check` works there.
+
+### Claude Code plugin
+
+Two commands, no bootstrap binary:
+
+```
+/plugin marketplace add asm0dey/precedent
+/plugin install precedent@precedent
+```
+
+That installs the ten skills and wires the session-start hook. The statusline badge is still
+manual — Claude Code has no plugin-provided statusline ([docs/setup.md](docs/setup.md)).
+
+The plugin root is the **repository** root, not `adapters/claude/`. `/plugin install` copies the
+plugin root and nothing above it, so an adapter-rooted plugin would ship the skills and the hook
+without `scripts/precedent.py` — the CLI all of them drive — and the hook fails closed, which
+looks exactly like a quiet session. Rooting at the repository puts the CLI inside the installed
+tree at the path the hook already resolves in a clone. The cost is that skills and the hook are
+no longer where convention looks, so `.claude-plugin/plugin.json` names both paths.
+
+Both manifests, `plugin.json` and `marketplace.json`, are generated from `agent-plugin.yaml` by
+`scripts/gen-plugin-json.py` (`--check` fails CI if they drift, or if a path plugin.json names
+stops existing).
+
+### Manual symlink
+
+What every channel above ends up doing to `~/.claude/`, done by hand. Also the option if you
+would rather not add a marketplace or install ACR:
+
+```bash
+git clone https://github.com/asm0dey/precedent ~/src/precedent
+ln -s ~/src/precedent/adapters/claude/skills/* ~/.claude/skills/
+```
+
+### Then wire the session-start hook
+
+The hook runs a brief for the working directory and injects it, so a session opens already
+knowing what you decided here and in comparable projects. It stays quiet where the graph has
+nothing to say, so empty directories cost nothing. ACR wires it for you; the plugin ships it in
+`hooks.json`; the symlink route needs a few lines in `~/.claude/settings.json`.
+
+That wiring, the `[PRECEDENT]` statusline badge, the Windows PowerShell variants, where the store
+lives and how to move or sync it, and the CLI underneath all of it:
+[docs/setup.md](docs/setup.md).
+
 ## Is this a memory layer?
 
 It is memory, in the sense that something survives the end of the session. What goes in is a
@@ -210,74 +286,6 @@ grader made explicit: the run that recorded two decisions also wrote a classific
 untagged project, and the grader counted that tag as metadata instead of a third journal entry.
 Under a literal line count the score is 25/29. `evals/` holds the prompts, assertions and a
 fixture seeder if you want to re-run or extend them.
-
-## Install
-
-Requires [`uv`](https://docs.astral.sh/uv/) and Python 3.12+, and Claude Code, Codex or Cursor.
-Linux, macOS or Windows. The CLI itself has no install step: it is a PEP 723 single file, and
-`uv` fetches what it needs on first run, then reuses a cached environment. (A persistent
-virtualenv was measured and rejected. It saves 11 ms per call, both paths being dominated by the
-engine import, and costs an install step plus an environment to keep in sync.) What differs by
-agent is how the skills and the hook get in front of it.
-
-### ACR (Codex, Cursor, and Claude Code)
-
-[ACR](https://github.com/jbaruch/agentic-context-registry) is the only channel that reaches Codex
-and Cursor. It is driven by `agent-plugin.yaml`, which ships the ten skills, the CLI script and
-the session-start hook:
-
-```bash
-acr install github:asm0dey/precedent --agent claude-code   # or codex, or cursor
-acr realize
-```
-
-`install` resolves the latest GitHub release, so a release has to exist. Each of the ten skills
-is its own artifact, and `realize` writes them into the agent's own skills directory:
-`.claude/skills/`, `.codex/skills/` or `.cursor/skills/` as appropriate.
-
-All three agents read those paths, so every skill works on every agent. The realized directories
-carry an ACR prefix (`acr__asm0dey__precedent__precedent-check`), which matters only if you type
-the name: skills fire from their descriptions, and that is how they are meant to fire. Codex
-registers them under their frontmatter name regardless, so `$precedent-check` works there.
-
-### Claude Code plugin
-
-`adapters/claude/` is the plugin root. `skills/*/SKILL.md` and `hooks/hooks.json` are discovered
-by Claude Code's own convention, so nothing is enumerated by hand. The manifest that drives this
-channel is `adapters/claude/.claude-plugin/plugin.json`, generated from `agent-plugin.yaml` by
-`scripts/gen-plugin-json.py` (`--check` fails CI if it drifts).
-
-No marketplace catalog for this plugin is published anywhere yet. This repo ships no
-`marketplace.json`, so `/plugin install precedent` is not something a reader can run today. A
-marketplace entry that lists this plugin would point at the subdirectory,
-`{"name": "precedent", "source": "./adapters/claude"}` for a marketplace hosted in this repo, or
-a `git-subdir` source with `path: "adapters/claude"` from elsewhere. A `git-subdir` source sparse-
-checks out only that named subdirectory, so it would ship the adapter without
-`scripts/precedent.py`, the CLI the adapter drives. A plugin install of this project needs the
-full repository checkout. That file, and which install shape avoids the gap above, is a decision
-for whoever hosts the catalog. `claude plugin validate adapters/claude` is Anthropic's own
-checker and currently passes, with one warning (the optional `author` field is absent).
-
-### Manual symlink
-
-What every channel above ends up doing to `~/.claude/`, done by hand. Also the option if you
-would rather not add a marketplace or install ACR:
-
-```bash
-git clone https://github.com/asm0dey/precedent ~/src/precedent
-ln -s ~/src/precedent/adapters/claude/skills/* ~/.claude/skills/
-```
-
-### Then wire the session-start hook
-
-The hook runs a brief for the working directory and injects it, so a session opens already
-knowing what you decided here and in comparable projects. It stays quiet where the graph has
-nothing to say, so empty directories cost nothing. ACR wires it for you; the plugin ships it in
-`hooks.json`; the symlink route needs a few lines in `~/.claude/settings.json`.
-
-That wiring, the `[PRECEDENT]` statusline badge, the Windows PowerShell variants, where the store
-lives and how to move or sync it, and the CLI underneath all of it:
-[docs/setup.md](docs/setup.md).
 
 ## License
 
