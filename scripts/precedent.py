@@ -1,32 +1,34 @@
 # /// script
 # requires-python = ">=3.12"
-# dependencies = ["grafeo", "filelock"]
+# dependencies = ["graphdblite"]
 # ///
 """precedent: durable, cross-project memory of the decisions you have made.
 
 Two stores, on purpose:
 
   journal.jsonl  append-only, one line per decision, the source of truth
-  graph.db       Grafeo graph, a queryable index rebuilt from the journal
+  graph.db       graphdblite graph, a queryable index rebuilt from the journal
 
-The journal exists because the graph engine is young (v0.5.x). If it ever eats
-itself, `precedent.py rebuild` replays the journal and nothing is lost. The journal is
-also plain text, so it diffs and survives in git.
+The journal exists because the graph engine is young (0.1.x) and because it
+makes the engine replaceable: `rebuild` replays the journal into whatever
+engine is current, so swapping one costs a rebuild, not the history. That is
+not hypothetical — this store was grafeo until the journal carried it across.
+The journal is also plain text, so it diffs and survives in git.
 
-Every subcommand is a short-lived process holding a file lock: exclusive if
-it writes, shared if it only reads. The lock is not optional for writers:
-concurrent processes on one embedded database silently drop writes (measured:
-120 writes across 6 processes -> 60 stored, zero errors raised). Readers share
-because a full open/query/close cycle is about a millisecond and queueing them
-behind a write buys nothing. Note that "reader" means reads no DECISION —
-opening the graph at all appends to its write-ahead log, so the shared lock is
-a bet that grafeo tolerates concurrent WAL appenders. `selftest` tests that bet
-rather than assuming it.
+Every subcommand is a short-lived process, and several run at once: a
+SessionStart hook runs `brief` while the model runs `check` and the user runs
+`record`, times however many sessions are open. Nothing coordinates them.
+There is no file lock — graphdblite serialises writers itself through SQLite,
+waiting up to BUSY_TIMEOUT_MS and then failing loudly rather than quietly
+dropping a write. That is a claim about someone else's engine, so `selftest`
+measures it on every OS this ships to instead of trusting it: see
+`_check_concurrent_writers` and `_check_reader_isolation`. The engine this
+replaced could not hold either property — unlocked, 120 writes across 6
+processes stored 60 and raised nothing.
 """
 from __future__ import annotations
 
 import argparse
-import filelock
 import json
 import os
 import pathlib
@@ -102,97 +104,115 @@ def resolve_home(home: pathlib.Path) -> pathlib.Path:
 
 
 class Store:
+    # How long a command waits for another process's write before giving up.
+    # Kept at the old file lock's 30s on purpose: the number was chosen so a
+    # slow `rebuild` cannot hang a SessionStart `brief` forever, and that
+    # reasoning did not change when the thing enforcing it did. SQLite raises
+    # after this; nothing waits indefinitely and nothing fails silently.
+    BUSY_TIMEOUT_MS = 30_000
+
     def __init__(self, home: pathlib.Path = HOME, write: bool = True):
         home.mkdir(parents=True, exist_ok=True)
         self.home = home = resolve_home(home)
         home.mkdir(parents=True, exist_ok=True)
         self.db_path = home / "graph.db"
         self.journal = home / "journal.jsonl"
-        self.lock_path = home / ".lock"
+        # `write` no longer picks a lock mode — there is no lock. It still
+        # says whether this command may change the store, and two things read
+        # it: the grafeo-era migration below (only a writer may rebuild) and
+        # `_check_lock_modes`, which pins the classification so a command
+        # cannot start writing by accident.
         self.write = write
-        # This library, not raw POSIX file locking: the POSIX module does
-        # not exist on Windows, and it was imported at module scope, so the
-        # whole CLI failed to start there. Hand-rolling a cross-platform
-        # locking shim means owning a concurrency primitive on an OS this
-        # project does not run and cannot test.
-        # ReadWriteLock, not FileLock: `check`, `suggest` and `export`
-        # change no decision, and queueing them behind a write serialises the
-        # common case for nothing. Writers stay exclusive.
-        # "Reader" is about decisions, not bytes: opening a grafeo db appends
-        # ~10 bytes to its WAL even with no query run, so a shared lock lets
-        # several processes append to that log at once. Measured: 6 concurrent
-        # readers, 27662 opens, nothing lost — while 6 concurrent writers lost
-        # 79% of their writes in silence (grafeo#405). Concurrent appends are
-        # benign, concurrent data writes are not. _check_grafeo_readers keeps
-        # that honest; its docstring carries the numbers.
-        # 30s timeout, not the default unbounded wait, and it is on readers
-        # too: the SessionStart hook runs `brief` on every session start, and
-        # an unbounded lock would hang every new session silently if a slow
-        # `rebuild` held it.
-        self._lock = filelock.ReadWriteLock(str(self.lock_path), timeout=30)
+        # Set by _migrate_grafeo_store when it moves an old store aside, so
+        # __enter__ knows to replay the journal into the fresh graph it then
+        # opens. The replay cannot run before the db exists.
+        self._pending_migration: pathlib.Path | None = None
 
     def __enter__(self):
-        # The timeout is passed per call rather than left to the instance.
-        # acquire_read/acquire_write default to -1, wait forever, and never
-        # consult self.timeout — only the read_lock/write_lock context
-        # managers do that, and they are context managers, so using them here
-        # would mean holding the graph open inside a nested `with`. Relying on
-        # the attribute would leave the 30s bound configured and unenforced.
-        acquire = self._lock.acquire_write if self.write else self._lock.acquire_read
-        try:
-            acquire(self._lock.timeout)
-        except filelock.Timeout:
-            mode = "write" if self.write else "read"
-            raise SystemExit(
-                f"error: could not acquire a {mode} lock at {self.lock_path} "
-                f"within {self._lock.timeout:g}s — another precedent process holds it")
-        import grafeo
+        # No lock is acquired here. Writers are serialised by the engine:
+        # concurrent CREATEs from separate processes either all land or raise
+        # StorageError after BUSY_TIMEOUT_MS. Measured on Linux and macOS,
+        # 8 processes x 200 writes with nothing coordinating them: 1600/1600
+        # stored, zero errors. `_check_concurrent_writers` re-measures it in
+        # CI on every OS this ships to, because the guarantee is the engine's
+        # and not this file's to assert.
+        import graphdblite
 
-        self.db = grafeo.GrafeoDB(str(self.db_path))
+        self._migrate_grafeo_store()
+        try:
+            self.db = graphdblite.Database(str(self.db_path),
+                                           busy_timeout_ms=self.BUSY_TIMEOUT_MS)
+        except graphdblite.StorageError as exc:
+            raise SystemExit(
+                f"error: could not open the graph at {self.db_path}: {exc}\n"
+                f"  the journal is the source of truth — `precedent.py rebuild` "
+                f"replays it into a fresh graph")
+        if self._pending_migration is not None:
+            # Loud on stderr, not stdout: `brief`'s stdout is injected into a
+            # model's context by the SessionStart hook, and a migration notice
+            # is not precedent. It still has to be seen, so it is not silent.
+            n, skipped = replay_journal(self)
+            print(f"precedent: graph rebuilt from the journal for the current engine "
+                  f"({n} entries; previous store kept at {self._pending_migration.name})",
+                  file=sys.stderr)
+            for msg in skipped:
+                print(f"  skipped {msg}", file=sys.stderr)
+            self._pending_migration = None
         return self
+
+    def _migrate_grafeo_store(self) -> None:
+        """Carry a store written by the previous engine across, once.
+
+        grafeo kept `graph.db` as a DIRECTORY; graphdblite wants a file at
+        that path and raises `unable to open database file` on the old one.
+        Every store that predates this change is in that state, so leaving it
+        to the user means the hook fails quietly on their next session — the
+        one failure mode this project refuses. The journal is the source of
+        truth and `rebuild` already replays it, so the migration is exactly
+        that, run automatically.
+
+        The old directory is renamed aside, never deleted: if the replay is
+        wrong in some way nobody has thought of yet, the evidence is still on
+        disk. A reader cannot do this — it is a write — so it says what to run
+        instead of half-migrating under a command that promised not to change
+        anything.
+        """
+        if not self.db_path.is_dir():
+            return
+        if not self.write:
+            raise SystemExit(
+                f"error: {self.db_path} was written by the previous graph engine.\n"
+                f"  run `precedent.py rebuild` (or any command that records) to "
+                f"replay the journal into the current one")
+        aside = self.db_path.with_name(f"graph.db.grafeo-{int(time.time())}")
+        self.db_path.rename(aside)
+        self._pending_migration = aside
 
     def __exit__(self, *exc):
         try:
             self.db.close()
         except Exception:
             pass
-        self._lock.release()
         return False
 
     def q(self, cypher: str, params: dict | None = None) -> list[dict]:
-        # Writers run every statement inside a grafeo transaction. Not for
-        # concurrency between processes — that is entirely the file lock's
-        # job, see __init__ — but because grafeo's WAL records ONE PROPERTY
-        # PER RECORD: `SET n.a=$i, n.b=$i` is one Cypher statement but two
-        # WalRecord::SetNodeProperty entries. With no transaction there is no
-        # commit boundary joining those two records, so a *reader* process
-        # that opens the db between them (which the shared read lock
-        # explicitly allows to happen concurrently with a writer) can observe
-        # the new `a` alongside the stale `b` — a torn write. Measured on
-        # macOS (4 readers x 4s per cell): bare writer + bare reader = 755
-        # reads, 16 torn; writer in a transaction = 0 torn; reader in a
-        # transaction = 0 torn; both = 0 torn. Reproduced on Windows too;
-        # Linux did not tear in this measurement (see _check_grafeo_readers'
-        # docstring). grafeo's begin_transaction docs promise "snapshot
-        # isolation — all queries within the transaction see a consistent
-        # view" and an epoch that "increments with each committed
-        # transaction" — exactly the missing atomicity boundary.
-        #
-        # Do NOT read this as "transactions replace the lock." Measured on
-        # Linux, 6 processes x 20 writes each (120 expected, no lock held):
-        # bare = 40 stored, in-transaction = 48 stored, "serializable" = 20
-        # stored — all three exit 0 and raise nothing, i.e. silent loss in
-        # every case. Only this class's filelock (ReadWriteLock, see
-        # __init__) got all 120 stored. Never use "serializable" here — it
-        # lost the most of the three. The transaction below buys atomic
-        # visibility of a single multi-property statement to a concurrent
-        # reader; it buys nothing against a second concurrent writer.
-        if not self.write:
-            return list(self.db.execute(cypher, params) if params else self.db.execute(cypher))
-        with self.db.begin_transaction() as tx:
-            rows = list(tx.execute(cypher, params) if params else tx.execute(cypher))
-            tx.commit()
-        return rows
+        """Run one statement. No explicit transaction, on purpose.
+
+        The engine this replaced needed `begin_transaction()` around every
+        write, because its WAL recorded ONE PROPERTY PER RECORD: `SET n.a=$i,
+        n.b=$i` was one statement but two records with no commit boundary
+        joining them, so a second process could read the new `a` beside the
+        stale `b`. graphdblite runs a bare statement as its own SQLite
+        transaction, which is the boundary that was missing. Measured rather
+        than assumed, on macOS where the old tear reproduced: 4 readers
+        against a live writer, 11,956 reads, zero torn — the same harness,
+        same machine, showed 15 torn reads out of 873 on the old engine.
+
+        `_check_reader_isolation` runs that measurement in CI, so a future
+        engine or version that loses the property fails there rather than in
+        somebody's verdict.
+        """
+        return list(self.db.execute(cypher, params) if params else self.db.execute(cypher))
 
     def log(self, op: str, payload: dict) -> None:
         """Journal first, then mutate. A crash between the two costs a replay, not data."""
@@ -782,9 +802,15 @@ def cmd_brief(a, s: Store) -> None:
     info = project_info(s, a.project)
     backfill_portable(s, info)
 
+    # WHERE goes with the MATCH it filters, BEFORE the OPTIONAL MATCH. After
+    # it, openCypher binds it to the optional pattern, which filters nothing:
+    # superseded decisions come back with an empty topic list instead of being
+    # excluded. The previous engine applied it to the whole query, so this read
+    # correctly there by accident; graphdblite follows the spec and showed the
+    # bug (10 "decided here" instead of 8). Three siblings below had it too.
     here = s.q("""MATCH (d:Decision)-[:IN_PROJECT]->(:Project {id:$pid})
-                  OPTIONAL MATCH (d)-[:ABOUT]->(t:Topic)
                   WHERE d.status='active'
+                  OPTIONAL MATCH (d)-[:ABOUT]->(t:Topic)
                   RETURN d.id AS id, d.title AS title, d.scope AS scope,
                          d.created AS created, d.despite AS despite,
                          collect(DISTINCT t.name) AS topics
@@ -793,8 +819,8 @@ def cmd_brief(a, s: Store) -> None:
     above, below = enclosing(s, info), contained(s, info)
 
     inherited = s.q("""MATCH (d:Decision)-[:IN_PROJECT]->(p:Project)
-                       OPTIONAL MATCH (d)-[:ABOUT]->(t:Topic)
                        WHERE p.id IN $ids AND d.status='active'
+                       OPTIONAL MATCH (d)-[:ABOUT]->(t:Topic)
                        RETURN d.id AS id, d.title AS title, d.scope AS scope,
                               p.name AS project, collect(DISTINCT t.name) AS topics
                        ORDER BY project""",
@@ -860,8 +886,8 @@ def cmd_brief(a, s: Store) -> None:
     ids = [r["id"] for r in kin]
     peers = s.q("""MATCH (d:Decision)-[:IN_PROJECT]->(p:Project),
                          (d)-[:ABOUT]->(tp:Topic)
-                   OPTIONAL MATCH (d)-[:CHOSE]->(o:Option)
                    WHERE p.id IN $ids AND d.status='active'
+                   OPTIONAL MATCH (d)-[:CHOSE]->(o:Option)
                    RETURN tp.name AS topic, collect(DISTINCT o.name) AS opts,
                           collect(DISTINCT p.name) AS projects, count(DISTINCT p) AS n
                    ORDER BY n DESC LIMIT 20""", {"ids": ids}) if ids else []
@@ -1025,8 +1051,8 @@ def cmd_suggest(a, s: Store) -> None:
     ids = [r["id"] for r in kin]
     peers = s.q("""MATCH (d:Decision)-[:IN_PROJECT]->(p:Project),
                          (d)-[:ABOUT]->(tp:Topic)
-                   OPTIONAL MATCH (d)-[:CHOSE]->(o:Option)
                    WHERE p.id IN $ids AND d.status='active'
+                   OPTIONAL MATCH (d)-[:CHOSE]->(o:Option)
                    RETURN tp.name AS topic, count(DISTINCT p) AS n,
                           collect(DISTINCT o.name) AS opts
                    ORDER BY n DESC""", {"ids": ids}) if ids else []
@@ -1312,12 +1338,14 @@ def cmd_maintain(a, s: Store) -> None:
     print(f"home:  {s.home}")
 
 
-def cmd_rebuild(a, s: Store) -> None:
-    """Replay the journal into a fresh graph. The escape hatch that makes a
-    young graph engine an acceptable dependency."""
-    if not s.journal.exists():
-        print("no journal — nothing to rebuild from")
-        return
+def replay_journal(s: Store) -> tuple[int, list[str]]:
+    """Replay every journal entry into the graph, reporting what would not go.
+
+    Split out of `cmd_rebuild` because the grafeo-era migration in
+    `Store._migrate_grafeo_store` needs the same replay without the command's
+    printing: one implementation, so a store rebuilt by hand and a store
+    carried across engines are built the same way.
+    """
     s.q("MATCH (n) DETACH DELETE n")
     n, skipped = 0, []
     for lineno, line in enumerate(open(s.journal), 1):
@@ -1340,6 +1368,17 @@ def cmd_rebuild(a, s: Store) -> None:
             skipped.append(f"line {lineno}: {e.get('op', '?')} — {type(exc).__name__}: {exc}")
             continue
         n += 1
+    return n, skipped
+
+
+def cmd_rebuild(a, s: Store) -> None:
+    """Replay the journal into a fresh graph. The escape hatch that makes a
+    young graph engine an acceptable dependency — and the thing that made
+    swapping the engine underneath it a rebuild rather than a migration."""
+    if not s.journal.exists():
+        print("no journal — nothing to rebuild from")
+        return
+    n, skipped = replay_journal(s)
     print(f"rebuilt {n} journal entries into {s.db_path}")
     if skipped:
         print(f"skipped {len(skipped)} unusable entr"
@@ -1417,7 +1456,7 @@ def _ensure_removable(path: pathlib.Path) -> None:
 
     Checked before relocate() moves anything, not caught mid-move: a real
     store here can hold root-owned directories (left by an earlier
-    docker-mounted grafeo-server run, store bind-mounted), and a
+    docker-mounted graph server run, store bind-mounted), and a
     PermissionError partway through the move loop would strand payload split
     across both directories with no pointer written — after which
     resolve_home(default) keeps quietly resolving to default, masking
@@ -1447,10 +1486,10 @@ def relocate(target: pathlib.Path, default: pathlib.Path = DEFAULT_HOME) -> str:
     if default.exists() and not default.is_dir():
         raise SystemExit(f"{default} exists and is not a directory; move it aside first")
     default.mkdir(parents=True, exist_ok=True)
-    # Prefix match, not exact equality: filelock's SQLite backend produces no
-    # sidecars today (checked under a held write lock, a held read lock, and
-    # after close), but a future filelock that switches to WAL would, and
-    # this survives that without another look here.
+    # `.lock*` is skipped for stores that predate the engine swap: the file
+    # lock is gone, but a store written before it was removed still has one
+    # sitting there, and a leftover from a tool nobody runs any more must not
+    # be what makes relocate refuse to move a store.
     payload = [f for f in default.iterdir()
                if not f.name.startswith(".lock") and f.name != POINTER]
     occupied = [f for f in target.iterdir()
@@ -1526,27 +1565,35 @@ def cmd_cypher(a, s: Store) -> None:
 
 
 def export_to(s: Store, out: pathlib.Path) -> pathlib.Path:
-    """Write the graph where grafeo-server can read it.
+    """Write a consistent, self-contained copy of the store.
 
-    The live store is WAL-only: graph.db holds a wal/ directory and no
-    data.grafeo, so a server pointed straight at it reports an empty database
-    and helpfully creates a second, real one next to yours. save() materialises
-    the file, under the <data-dir>/<name>/ layout the server looks for.
+    `snapshot_to` copies the graph as of now — taken while this command holds
+    the db open, so it cannot catch a half-finished write from another
+    process. The journal goes with it because the journal, not the graph, is
+    the source of truth: a snapshot without it is an index nothing can rebuild.
+
+    The layout is a store directory, so the copy is usable directly:
+    `precedent.py --home <out> check ...`. It does NOT follow the original —
+    re-run this after recording.
+
+    What this used to produce was a grafeo-server data directory, for a
+    read-only web UI on :7474. graphdblite has no server, so that UI is gone
+    rather than ported.
     """
+    import shutil
+
     out.mkdir(parents=True, exist_ok=True)
-    (out / "default").mkdir(exist_ok=True)
-    s.db.save(str(out / "default" / "data.grafeo"))
+    s.db.snapshot_to(str(out / "graph.db"))
+    if s.journal.exists():
+        shutil.copy2(s.journal, out / "journal.jsonl")
     return out
 
 
 def cmd_export(a, s: Store) -> None:
     out = export_to(s, pathlib.Path(a.out or pathlib.Path(a.home) / "export").expanduser().resolve())
-    user = "" if os.name == "nt" else " --user $(id -u):$(id -g)"
     print(f"exported: {out}")
-    print("serve it read-only — two writers on one embedded db silently drop writes:")
-    print(f"  docker run --rm -p 7474:7474{user} \\")
-    print(f"    -v {out}:/data grafeo/grafeo-server:latest --data-dir /data --read-only")
-    print("  then open http://localhost:7474")
+    print("it is a complete store — graph plus journal — so query it in place:")
+    print(f"  precedent.py --home {out} check --topic <topic>")
     print("re-run this after recording, the snapshot is a copy and does not follow the store")
 
 
@@ -1564,8 +1611,9 @@ def _check_helpers() -> None:
     # encoding pinned: this file is full of non-ASCII prose and read_text()
     # defaults to the locale codepage, which raises on a Windows console.
     assert banned not in pathlib.Path(__file__).read_text(encoding="utf-8"), (
-        f"{banned} does not exist on Windows and this CLI must start there;"
-        " filelock is already a dependency and is the cross-platform answer.")
+        f"{banned} does not exist on Windows and this CLI must start there."
+        " Nothing in this file locks any more — the engine serialises writers"
+        " itself; see _check_concurrent_writers.")
 
 
 def _check_detect_project() -> None:
@@ -1787,275 +1835,158 @@ def _check_relocate() -> None:
 
 
 def _check_export(s: Store) -> None:
-    # The export layout is what the server reads; if save() or the directory
-    # shape changes, the UI shows an empty graph and says nothing.
+    # An export that writes a file nothing can open is indistinguishable from
+    # a good one until someone needs it, so this opens the copy and reads it
+    # back through a real Store rather than stat-ing the bytes.
     import tempfile
     with tempfile.TemporaryDirectory() as td:
         exp = pathlib.Path(td) / "export"
         export_to(s, exp)
-        assert (exp / "default" / "data.grafeo").stat().st_size > 0, "export wrote nothing"
+        assert (exp / "graph.db").stat().st_size > 0, "export wrote no graph"
+        # Only when there is one to copy: a store that has recorded nothing
+        # has no journal, and an export of it is legitimately graph-only.
+        assert (exp / "journal.jsonl").exists() == s.journal.exists(), (
+            "export wrote a graph with no journal — the copy cannot be rebuilt")
+        with Store(exp, write=False) as copy:
+            n = copy.q("MATCH (n) RETURN count(n) AS n")[0]["n"]
+        live = s.q("MATCH (n) RETURN count(n) AS n")[0]["n"]
+        assert n == live, f"export holds {n} nodes, the store has {live}"
 
 
-def _check_store(s: Store) -> None:
-    """The lock must exclude a second process in the modes it claims, and it
-    must give up rather than wait forever.
+def _check_concurrent_writers() -> None:
+    """Concurrent writers must all land, or fail loudly. Never silently drop.
 
-    A lock that silently does not lock is the failure mode grafeo#405
-    documents: 120 writes across 6 processes, 60 stored, no errors raised.
-    Two lock objects for one path in one process would not prove exclusion —
-    filelock returns the same instance for a given path — so every
-    proposition here is proved against a forked holder process.
+    This is the check that replaced a file lock. precedent is N short-lived
+    processes on one store — a SessionStart hook running `brief`, a model
+    running `check`, a user running `record`, times however many sessions are
+    open — and nothing coordinates them. The previous engine could not take
+    that: 6 processes x 20 writes stored 60 of 120 on macOS and 40 of 120 on
+    Linux, every process exiting 0, nothing raised. 8 x 200 stored 569 of
+    1600. Silent loss in a store whose whole job is remembering is the worst
+    failure this project has.
 
-    The contention runs against throwaway paths in a temp directory, not
-    s.lock_path: s's own lock is held for the whole selftest command (main()
-    enters the Store before dispatching to cmd_selftest), and contending on
-    the real path here would mean releasing the lock guarding the open graph
-    db for the duration of the check — exactly the hazard the lock exists to
-    prevent. A throwaway path proves the same filelock mechanics without
-    mutating the store under test. Wiring — that Store built its lock against
-    lock_path, in the mode it was asked for — is checked against s._lock's own
-    attributes instead, and Store's own acquire path is exercised by two
-    throwaway Stores on throwaway homes at the end.
+    graphdblite serialises writers through SQLite and waits up to
+    BUSY_TIMEOUT_MS before raising StorageError. Measured unlocked, 8
+    processes x 200 writes: 1600/1600 on Linux and on macOS, no errors. That
+    is a property of someone else's engine on someone else's OS, which is
+    exactly the kind of claim this project does not take on trust — Windows
+    is where the old engine's worst behaviour showed up, and CI runs this
+    there on every push.
 
-    The timeout is proved behaviourally, not by reading the attribute back.
-    acquire_read/acquire_write default to waiting forever and never consult
-    the instance timeout — only the read_lock/write_lock context managers do
-    — so a Store that configured 30s and then acquired without passing it
-    would satisfy an attribute assert while hanging every session start. The
-    holder below outlives the contender's timeout twentyfold, so an unenforced
-    timeout cannot pass quietly: it either waits out the holder and then
-    acquires, which the `else` branch fails on, or it raises Timeout long
-    after it was asked to, which LATE fails on.
+    Each writer is its own `Store(home, write=True)` per write — acquire
+    nothing, open, write, close — because that is the real shape of a
+    precedent command. A single Store held across a loop would test one
+    process's connection, not two processes' contention.
+
+    A write that RAISES is not a failure of this check as long as nothing is
+    lost: loud contention is a supported outcome (the caller sees a non-zero
+    exit and a message), silent loss is not. So the assertion is on the sum:
+    every write either stored a row or reported itself.
     """
-    assert s.write is True, "selftest mutates the graph; Store must be in write mode"
-    assert s._lock.lock_file == str(s.lock_path), "Store did not lock its own path"
-    assert s._lock._current_mode == "write", "a writer command must hold a write lock"
-    # Documentation of the configured value; the contention below is what
-    # proves the mechanism.
-    assert s._lock.timeout == 30, "Store lock must have a bounded timeout"
-
-    # A pointer file, not a symlink: os.symlink raises WinError 1314 without
-    # Developer Mode, which made `init` unavailable on Windows for its whole
-    # purpose. Resolution follows the pointer exactly once — a pointer inside
-    # the target is data, not a second hop.
-    import tempfile
-    with tempfile.TemporaryDirectory() as tmp:
-        default, target = pathlib.Path(tmp) / "default", pathlib.Path(tmp) / "target"
-        default.mkdir()
-        (default / "journal.jsonl").write_text('{"op":"noop"}\n')
-        relocate(target, default=default)
-        assert not (default / "journal.jsonl").exists(), "payload must move"
-        assert (target / "journal.jsonl").exists(), "payload must arrive"
-        assert (default / POINTER).read_text().strip() == str(target)
-        assert resolve_home(default) == target, "pointer must resolve"
-        (target / POINTER).write_text(str(default))
-        assert resolve_home(default) == target, "resolution must not loop"
-
     import subprocess
     import tempfile
-    import filelock
 
-    # Holds `mode` on argv[1] until killed, announcing when it actually has it.
-    holder_src = (
-        "import sys, time, filelock;"
-        "l = filelock.ReadWriteLock(sys.argv[1]);"
-        "getattr(l, 'acquire_' + sys.argv[2])(10);"
-        "print('held', flush=True);"
-        "time.sleep(10)")
+    WRITERS = 6
+    PER_WRITER = 20
 
-    def fork_holder(path: pathlib.Path, mode: str) -> subprocess.Popen:
-        h = subprocess.Popen([sys.executable, "-c", holder_src, str(path), mode],
-                             stdout=subprocess.PIPE, text=True)
-        assert h.stdout is not None
-        assert h.stdout.readline().strip() == "held", f"{mode} holder never acquired"
-        return h
-
-    # Long enough that an unenforced timeout is unmistakable, short enough to
-    # keep the selftest quick.
-    WAIT = 0.5
-    LATE = 5.0
+    precedent_path = str(pathlib.Path(__file__).resolve())
+    # A subprocess cannot `import precedent` — this file is a script, not an
+    # installed package — so it loads this exact module by path.
+    writer_src = (
+        "import sys, json, pathlib, importlib.util\n"
+        "spec = importlib.util.spec_from_file_location('precedent_under_test', sys.argv[1])\n"
+        "precedent = importlib.util.module_from_spec(spec)\n"
+        "spec.loader.exec_module(precedent)\n"
+        "home = pathlib.Path(sys.argv[2])\n"
+        "wid, n = sys.argv[3], int(sys.argv[4])\n"
+        "stored = raised = 0\n"
+        "for i in range(n):\n"
+        "    try:\n"
+        "        with precedent.Store(home, write=True) as s:\n"
+        "            s.q('CREATE (:WriteProbe {k:$k})', {'k': wid + '-' + str(i)})\n"
+        "        stored += 1\n"
+        "    except BaseException:\n"
+        "        raised += 1\n"
+        "print(json.dumps({'stored': stored, 'raised': raised}), flush=True)\n")
 
     with tempfile.TemporaryDirectory() as tmp:
-        tmpdir = pathlib.Path(tmp)
-
-        # A held write lock excludes both a second writer and a reader.
-        write_held = tmpdir / "write-held.lock"
-        # Contender first: fork_holder asserts, and a holder forked before it
-        # would be left sleeping on the temp lock file if that assert fired.
-        contender = filelock.ReadWriteLock(str(write_held))
-        holder = fork_holder(write_held, "write")
-        try:
-            for mode in ("write", "read"):
-                started = time.monotonic()
-                try:
-                    getattr(contender, "acquire_" + mode)(WAIT)
-                except filelock.Timeout:
-                    waited = time.monotonic() - started
-                    assert waited < LATE, (
-                        f"a {mode} lock waited {waited:.1f}s for a {WAIT}s timeout — "
-                        "the timeout is configured but not enforced")
-                else:
-                    contender.release()
-                    raise AssertionError(f"a held write lock let a {mode} lock in")
-        finally:
-            contender.close()
-            holder.kill()
-            holder.wait()
-
-        # A held read lock does NOT exclude a second reader. This is the split.
-        read_held = tmpdir / "read-held.lock"
-        contender = filelock.ReadWriteLock(str(read_held))
-        holder = fork_holder(read_held, "read")
-        try:
+        home = pathlib.Path(tmp) / "home"
+        with Store(home, write=True):
+            pass                      # create the store before racing on it
+        procs = [subprocess.Popen(
+            [sys.executable, "-c", writer_src, precedent_path, str(home), f"w{w}", str(PER_WRITER)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            for w in range(WRITERS)]
+        claimed = raised = 0
+        for i, pr in enumerate(procs):
             try:
-                contender.acquire_read(WAIT)
-            except filelock.Timeout:
-                raise AssertionError("readers were serialised against each other")
-            contender.release()
-        finally:
-            contender.close()
-            holder.kill()
-            holder.wait()
-
-        # Store.__enter__ must PASS the timeout, not merely configure it. The
-        # asserts above read the configured value back, which a Store that
-        # acquired with no argument would still satisfy while waiting forever.
-        # A throwaway Store on a throwaway home, its timeout turned down to
-        # WAIT, is entered against a lock a second process already holds for
-        # writing: it has to give up, in about its own timeout rather than
-        # whenever the holder happens to exit.
-        probe = Store(tmpdir / "store", write=False)
-        probe._lock.timeout = WAIT
-        holder = fork_holder(probe.lock_path, "write")
-        try:
-            started = time.monotonic()
-            try:
-                probe.__enter__()
-            except SystemExit as exc:
-                waited = time.monotonic() - started
-                assert waited < LATE, (
-                    f"Store waited {waited:.1f}s to fail a {WAIT}s lock — __enter__ "
-                    "configures the timeout without passing it to acquire")
-                assert "read lock" in str(exc), (
-                    f"the lock error must name the mode it wanted, got: {exc}")
-            else:
-                probe.__exit__()
+                out, err = pr.communicate(timeout=120)
+            except subprocess.TimeoutExpired:
+                pr.kill()
                 raise AssertionError(
-                    "Store opened a graph another process holds for writing")
-        finally:
-            probe._lock.close()
-            holder.kill()
-            holder.wait()
+                    f"writer {i} never finished {PER_WRITER} writes — a writer that "
+                    "blocks forever is as bad as one that loses data")
+            assert pr.returncode == 0, f"writer {i} died: {err.strip()[-500:]}"
+            res = json.loads(out)
+            claimed += res["stored"]
+            raised += res["raised"]
+        with Store(home, write=False) as s:
+            actual = s.q("MATCH (n:WriteProbe) RETURN count(n) AS n")[0]["n"]
 
-        # ...and a reader Store must really take a READ lock. Nothing above
-        # would notice a __enter__ that ignored self.write and locked
-        # exclusively every time: the raw locks prove filelock lets readers
-        # share, not that Store asks it to. So enter a reader against a lock
-        # another process holds for READING — which only a read lock can join
-        # — and confirm the mode it ended up in.
-        probe = Store(tmpdir / "shared-store", write=False)
-        probe._lock.timeout = WAIT
-        holder = fork_holder(probe.lock_path, "read")
-        entered = False
-        try:
-            try:
-                probe.__enter__()
-                entered = True
-            except SystemExit as exc:
-                raise AssertionError(
-                    f"a reader Store was locked out by another reader: {exc}")
-            assert probe._lock._current_mode == "read", (
-                "a reader command took a "
-                f"{probe._lock._current_mode} lock — the split is not wired up")
-        finally:
-            if entered:
-                probe.__exit__()
-            probe._lock.close()
-            holder.kill()
-            holder.wait()
+        expected = WRITERS * PER_WRITER
+        assert claimed + raised == expected, (
+            f"{expected - claimed - raised} of {expected} writes neither stored nor "
+            "raised — they vanished between the two")
+        assert actual == claimed, (
+            f"{claimed} writes reported success but {actual} are in the graph: "
+            f"{claimed - actual} were lost in silence, which is the exact failure "
+            "the removed file lock used to prevent. Do not paper over this by "
+            "reintroducing a lock without re-reading the engine's guarantees.")
+        assert raised == 0, (
+            f"{raised} of {expected} writes raised under {WRITERS}-way contention "
+            f"within {Store.BUSY_TIMEOUT_MS}ms. Nothing was lost, but a command "
+            "failing under ordinary concurrency is a regression worth seeing.")
 
 
-def _check_grafeo_readers() -> None:
-    """A reader must never observe a torn write, under the exact lock Store uses.
+def _check_reader_isolation() -> None:
+    """A reader must never observe a torn write, with nothing but the engine.
 
-    Earlier versions of this check opened grafeo directly, unlocked, on the
-    theory that testing something harder than the lock permits was
-    conservative. It was too conservative: it proved a property precedent
-    does not rely on and grafeo does not provide on macOS/Windows, no matter
-    what wraps the writer's statement. Wrapping the writer in a transaction
-    (`Store.q()`'s own transaction, see its comment) was tried and pushed as
-    the fix for that harness — CI still teared on macos-latest and
-    windows-latest. That is the decisive fact: a transaction changes what the
-    SAME process can see afterward, not what a SECOND process sees while the
-    WAL is mid-append, so it could never have closed this gap. This version
-    retargets the check at the guarantee `Store` actually depends on —
-    mutual exclusion between readers and writers — instead of at grafeo's own
-    cross-process isolation, which this project does not use and cannot rely
-    on to begin with.
+    This is the second property the file lock used to provide, and the one
+    that is easiest to lose quietly. Torn means a reader sees `[[N, N-1]]` —
+    the new value of one property beside the stale value of the other — from
+    a statement that set both. A verdict computed from a torn read is wrong
+    and says nothing about being wrong.
 
-    Why the lock is load-bearing and not an optimisation, measured rather
-    than assumed: unlocked, on macOS and Windows, a reader that opens the db
-    mid-write observes `[[N, N-1]]` — the new value of one property beside
-    the stale value of the other. grafeo's WAL records ONE PROPERTY PER
-    RECORD (`WalRecord::SetNodeProperty`): `SET n.a=$i, n.b=$i` is one Cypher
-    statement but two WAL records, and there is no cross-process commit
-    boundary joining them — a transaction only ever bounded what the writer's
-    own process could see. Linux did not reproduce the tear in that
-    measurement; that is an absence, not a guarantee it cannot happen there.
-    So: a reader and a writer must never touch the same grafeo db
-    concurrently. Do not "optimise" `Store`'s `ReadWriteLock` to permit that
-    overlap — this is exactly the failure it exists to prevent.
+    The previous engine tore because its WAL recorded ONE PROPERTY PER RECORD
+    (`WalRecord::SetNodeProperty`): `SET n.a=$i, n.b=$i` was one statement but
+    two records with no cross-process commit boundary between them. Wrapping
+    the WRITER in a transaction was tried and did not fix it — a transaction
+    bounds what the writer's own process sees, not what a second process sees
+    mid-append — so the lock had to keep readers and writers apart entirely.
 
-    The lock itself was measured before it was trusted, not just assumed
-    safe (grafeo#405): 6 concurrent writers with no lock attempted 6329
-    writes, stored 1311, raised nothing — 79% gone in silence. 6 concurrent
-    readers with no lock: 27662 opens, nothing lost. Concurrent WAL appends
-    by readers are benign; concurrent data writes are not — that asymmetry is
-    the entire justification for the read/write split in `Store.__init__`.
+    graphdblite runs each statement as its own SQLite transaction, which is
+    the boundary that was missing, so readers and writers may now overlap.
+    Measured before it was believed, on macOS, where the old tear reproduced
+    and Linux never did: same harness, same machine, 4 readers against a live
+    writer — the old engine gave 15 torn reads out of 873, graphdblite gave 0
+    out of 11,956. Linux showing nothing proves nothing here; that is why this
+    runs on every OS in CI.
 
-    So both sides here now run the exact lifecycle a real `precedent`
-    invocation runs, through `Store` itself (loaded from this file by path,
-    since a subprocess cannot just `import precedent`): the writer loops, and
-    each iteration is its OWN `Store(home, write=True)` — acquire, open,
-    write both properties, close, release — never one Store held across the
-    whole loop, which would starve the readers for the run's entire length
-    and prove nothing. Readers loop the same way with `write=False`. Under
-    `ReadWriteLock` a writer is exclusive against readers, so the two are
-    never concurrent — this is no longer harsher than production, it IS
-    production's contract, exercised the way `record`/`check`/etc. exercise
-    it: one lock acquisition per command.
+    Each reader reopens the store every round rather than opening once and
+    looping. A reader that opens once sees one frozen value for as long as the
+    writer runs, can never tear, and would pass vacuously — and reopening is
+    the true shape of every precedent command anyway: open, query, close.
 
-    Each reader still reopens the db every round rather than opening once and
-    looping: a reader that opens once would see one frozen value for as long
-    as the writer ran and could never observe a tear, so the check would pass
-    vacuously no matter what it was actually testing. Reopening every round
-    is also the true shape of every precedent command — open, query, close —
-    so this is fidelity, not extra paranoia.
+    Two honesty guards, kept from the locked version because this needs them
+    just as much: readers must have watched the writer's value ADVANCE (more
+    than one distinct value seen — a reader stuck on one value could never
+    tear and would pass for free), and the writer must still be alive when the
+    readers are reaped (a writer that quit early means nothing was read under
+    contention). Both are asserted below.
 
-    Two honesty guards survive from the unlocked version, because this one
-    needs them just as much: readers must have watched the writer's value
-    ADVANCE (more than one distinct value seen — a reader stuck on a single
-    frozen value could never tear and would pass for free), and the writer
-    must still be alive when the readers are reaped (a writer that quit early
-    means nothing was read under real contention). Both are asserted below.
-
-    A back-to-back writer loop with no pacing — each iteration as fast as
-    the Store lifecycle allows — starved individual readers under this lock
-    for multiple seconds at a stretch: measured, one reader in roughly eight
-    runs came back having seen only 1 distinct value despite a multi-second
-    budget, because the lock's SQLite backing resolved five contending
-    connections unevenly rather than round-robin. A 5ms pause between writer
-    iterations (WRITE_PACE) fixed it outright — 10/10 runs at ~190-205
-    distinct values per reader and a stable ~2.0s total — and it makes the
-    harness more honest, not less: nothing issues real `precedent` commands
-    back-to-back at unthrottled loop speed, so unthrottled was the
-    unrealistic case, not the paced one.
-
-    This check can still fail, and has to be able to: it is now a regression
-    guard on the LOCKING MODEL, not on the log. If a later change lets a
-    reader and a writer overlap — a "read without waiting" shortcut, a lock
-    split too finely, anything that weakens the exclusivity above — the exact
-    tear measured above returns, and the assertion below is what catches it.
+    If a future engine, version, or "optimisation" loses single-statement
+    atomicity across processes, the tear comes back and this assertion is what
+    catches it — before it reaches a verdict somebody acts on.
     """
     import subprocess
     import tempfile
@@ -2065,19 +1996,25 @@ def _check_grafeo_readers() -> None:
     WARMUP = 0.4         # let the node exist before readers look for it
     READERS = 4          # several Store(write=False) lifecycles, not just a pair
     STUCK = 5.0          # a reader past this is wedged, not slow
-    WRITE_PACE = 0.005   # see "back-to-back writer loop" above — this is load-bearing, not tidiness
+    WRITE_PACE = 0.005   # a realistic gap between commands; see the note below
     # WRITE_BUDGET is an upper bound nothing waits on: the writer is killed as
     # soon as the readers are reaped, so raising it costs no wall clock and
     # only widens the margin behind the `writer.poll()` assertion below.
     # Since the budget is free, it is 10 — comfortably above the ~2s this
-    # check actually takes with WRITE_PACE in place.
+    # check actually takes.
+    #
+    # WRITE_PACE: nothing issues precedent commands back-to-back at loop
+    # speed, so an unpaced writer is the unrealistic case, not the paced one.
+    # It also keeps a reader from spending its whole budget waiting on
+    # BUSY_TIMEOUT_MS behind a writer that never pauses, which would starve
+    # the distinct-values guard below and fail the check for the wrong reason.
 
     precedent_path = str(pathlib.Path(__file__).resolve())
 
     # A subprocess can't `import precedent` — this file is a script, not an
     # installed package — so it loads this exact module by path instead.
-    # Both loops use real `Store`, not raw grafeo, so the lock they take is
-    # the one `main()` takes for every command.
+    # Both loops use real `Store`, so they open the graph exactly the way
+    # every command does — same engine, same busy timeout, no lock.
     writer_src = (
         "import sys, time, pathlib, importlib.util\n"
         "spec = importlib.util.spec_from_file_location('precedent_under_test', sys.argv[1])\n"
@@ -2111,7 +2048,7 @@ def _check_grafeo_readers() -> None:
         "print(json.dumps({'distinct': len(seen), 'torn': torn[:5]}), flush=True)\n")
 
     with tempfile.TemporaryDirectory() as tmp:
-        # A `home` for Store to build .lock/graph.db/journal.jsonl under —
+        # A `home` for Store to build graph.db/journal.jsonl under —
         # never the real store; each run gets a fresh, disposable one.
         home = pathlib.Path(tmp) / "home"
         writer = subprocess.Popen(
@@ -2127,17 +2064,17 @@ def _check_grafeo_readers() -> None:
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True))
             results = []
             for i, r in enumerate(readers):
-                # Bounded like every other wait here. A reader wedged inside
-                # Store's lock acquisition or a grafeo query under
-                # contention is the very thing this check probes, and it
-                # must fail loudly rather than hang the selftest; the
-                # finally below reaps it either way.
+                # Bounded like every other wait here. A reader wedged behind
+                # a writer — BUSY_TIMEOUT_MS is 30s, twenty times this
+                # budget — is the very thing this check probes, and it must
+                # fail loudly rather than hang the selftest; the finally
+                # below reaps it either way.
                 try:
                     out, err = r.communicate(timeout=READ_BUDGET + STUCK)
                 except subprocess.TimeoutExpired:
                     raise AssertionError(
                         f"reader {i} outlived a {READ_BUDGET:g}s budget by {STUCK:g}s — "
-                        "it is stuck acquiring Store's shared lock or inside grafeo")
+                        "it is wedged inside the engine, not merely slow")
                 assert r.returncode == 0, (
                     f"reader {i} crashed while the writer was running: {err.strip()[-500:]}")
                 results.append(json.loads(out))
@@ -2147,9 +2084,11 @@ def _check_grafeo_readers() -> None:
                     f"under contention: {writer.communicate()[1].strip()[-500:]}")
             for i, res in enumerate(results):
                 assert not res["torn"], (
-                    f"reader {i} observed a torn write {res['torn']}: a reader and a writer "
-                    "overlapped even though both went through Store's ReadWriteLock — "
-                    "the lock is no longer doing its job")
+                    f"reader {i} observed a torn write {res['torn']}: one statement set "
+                    "both properties, so a reader that sees one new and one stale value "
+                    "means the engine is not giving a bare statement a cross-process "
+                    "commit boundary. Verdicts computed from this are wrong and look "
+                    "right. This is what the removed file lock used to prevent.")
                 assert res["distinct"] > 1, (
                     f"reader {i} saw {res['distinct']} distinct value(s) — it never watched "
                     "the writer advance, so this check proved nothing")
@@ -2162,13 +2101,14 @@ def _check_grafeo_readers() -> None:
 
 
 def _check_lock_modes() -> None:
-    """Every command's lock mode, against a table written out by hand.
+    """Every command's write classification, against a table written by hand.
 
     build_parser's `writes=True` fallback covers a subparser that forgets the
-    flag. Nothing covers one that sets it wrongly, and the two mistakes are not
-    symmetric: a reader marked True is merely slow, a writer marked False
-    corrupts the graph the lock exists to protect. This classification is the
-    whole risk surface of the read-write split, so it gets an assertion.
+    flag. Nothing covers one that sets it wrongly. With the file lock gone the
+    flag no longer picks a lock mode, but it is not decorative: a command
+    marked False may not migrate a grafeo-era store (see
+    `Store._migrate_grafeo_store`), so a writer misfiled as a reader dies on
+    the first store that needs carrying across instead of carrying it.
 
     The expected mapping is literal, not derived from the parser. Deriving it
     would track whatever the table says and never fail; written out, changing
@@ -2179,7 +2119,7 @@ def _check_lock_modes() -> None:
     expected = {
         # read-only in the sense that matters: they settle no decision
         "check": False, "suggest": False, "export": False,
-        "maintain": False,      # until --apply; see wants_write_lock
+        "maintain": False,      # until --apply; see wants_write()
         "standing-orders": False,  # returns before any Store is opened
         # writers
         "record": True, "tag": True, "regret": True, "principle": True,
@@ -2197,12 +2137,12 @@ def _check_lock_modes() -> None:
         f"the graph, so confirm this on purpose:\n  got      {actual}\n  expected {expected}")
 
     # maintain is the derived case, and the derivation is the thing that can rot.
-    assert wants_write_lock(p.parse_args(["maintain"])) is False, "maintain must read"
-    assert wants_write_lock(p.parse_args(["maintain", "--apply"])) is True, (
+    assert wants_write(p.parse_args(["maintain"])) is False, "maintain must read"
+    assert wants_write(p.parse_args(["maintain", "--apply"])) is True, (
         "maintain --apply deletes nodes and must take the write lock")
     # and the flag still reaches the mode for an ordinary reader and writer
-    assert wants_write_lock(p.parse_args(["check", "--topic", "t"])) is False
-    assert wants_write_lock(p.parse_args(["record", "--title", "t"])) is True
+    assert wants_write(p.parse_args(["check", "--topic", "t"])) is False
+    assert wants_write(p.parse_args(["record", "--title", "t"])) is True
 
 
 def _check_journal(s: Store) -> None:
@@ -2453,11 +2393,19 @@ def _check_maintain(s: Store) -> None:
             "project_id": "/tmp/precedent-selftest-m", "project_name": "m",
             "tags": [], "topics": ["selftest-caching"],
             "rejected": [], "supersedes": []}
+    # Scoped to this check's own project. contradictions_in() reports the
+    # whole store, and asserting on that made the selftest assert a property
+    # of the USER'S data: any real clash they have recorded — two live
+    # decisions answering one topic differently, which `maintain` exists to
+    # report — failed the check. It passed in CI only because CI's store is
+    # empty. Confirmed against the previous engine too, so this is a
+    # pre-existing isolation bug, not a consequence of the engine swap.
+    mine = lambda: [c for c in contradictions_in(s) if c["project"] == "m"]
     try:
         write_decision(s, {**base, "id": "selftest-m1", "chose": ["redis", "memcached"]})
-        assert contradictions_in(s) == [], "a multi-option decision is not a clash"
+        assert mine() == [], "a multi-option decision is not a clash"
         write_decision(s, {**base, "id": "selftest-m2", "chose": ["hazelcast"]})
-        clash = contradictions_in(s)
+        clash = mine()
         assert len(clash) == 1 and clash[0]["topic"] == "selftest-caching", clash
         assert set(clash[0]["decisions"]) == {"selftest-m1", "selftest-m2"}, clash
 
@@ -2770,10 +2718,10 @@ def cmd_selftest(a, s: Store) -> None:
     _check_decisions(s)
     _check_relocate()
     _check_export(s)
-    _check_store(s)
+    _check_concurrent_writers()
     _check_journal(s)
     _check_lock_modes()
-    _check_grafeo_readers()
+    _check_reader_isolation()
     _check_verdicts(s)
     _check_maintain(s)
     _check_identity(s)
@@ -2864,7 +2812,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     m = sub.add_parser("maintain", help="contradictions, dead projects, orphans, counts")
     m.add_argument("--apply", action="store_true", help="perform the safe cleanups")
-    # Reports only, until --apply deletes orphan nodes; wants_write_lock()
+    # Reports only, until --apply deletes orphan nodes; wants_write()
     # promotes it then.
     m.set_defaults(writes=False, fn=cmd_maintain)
 
@@ -2888,7 +2836,7 @@ def build_parser() -> argparse.ArgumentParser:
     # Serialising a rare interactive escape hatch is the cheap side of that.
     cy.set_defaults(writes=True, fn=cmd_cypher)
 
-    ex = sub.add_parser("export", help="snapshot the graph for grafeo-server and its web UI")
+    ex = sub.add_parser("export", help="snapshot the store (graph + journal) to a directory")
     ex.add_argument("--out", help="where to write the snapshot (default: <store>/export)")
     ex.set_defaults(writes=False, fn=cmd_export)
 
@@ -2896,7 +2844,7 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def wants_write_lock(a) -> bool:
+def wants_write(a) -> bool:
     """Whether a parsed command needs the exclusive lock.
 
     Answered before the Store exists, because it has to be: ReadWriteLock
@@ -2914,7 +2862,7 @@ def main(argv=None) -> int:
     if a.cmd in ("init", "standing-orders"):
         a.fn(a)
         return 0
-    with Store(pathlib.Path(a.home), write=wants_write_lock(a)) as s:
+    with Store(pathlib.Path(a.home), write=wants_write(a)) as s:
         a.fn(a, s)
     return 0
 
