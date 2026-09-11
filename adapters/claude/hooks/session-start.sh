@@ -32,7 +32,16 @@ command -v uv >/dev/null 2>&1 || exit 0
 # --only-if-relevant prints nothing when this directory has no decisions and no
 # comparable projects, so the decision is made on the data rather than by
 # grepping output whose wording can change.
-BRIEF=$(timeout 20 uv run --quiet "$DG" brief --project "$PWD" --only-if-relevant 2>/dev/null) || exit 0
+# `timeout` is GNU coreutils and is not on a stock macOS, where Homebrew
+# spells it `gtimeout`. Hardcoding it meant the command failed to start at
+# all and the `|| exit 0` below read that as "nothing to say" — no brief on
+# any Mac, silently. The bound is best-effort: without either binary the
+# brief still runs, unguarded, rather than not running.
+TIMEOUT=""
+for t in timeout gtimeout; do
+  if command -v "$t" >/dev/null 2>&1; then TIMEOUT="$t"; break; fi
+done
+BRIEF=$(${TIMEOUT:+$TIMEOUT 20} uv run --quiet "$DG" brief --project "$PWD" --only-if-relevant 2>/dev/null) || exit 0
 [ -n "$BRIEF" ] || exit 0
 
 # An empty file: the statusline reads only the name, never the contents.
