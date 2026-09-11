@@ -1,7 +1,7 @@
 {
   "name": "precedent",
   "description": "Remember and reuse the user's architectural, business and tooling decisions across every project, in a queryable graph.",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "author": {
     "name": "asm0dey",
     "url": "https://github.com/asm0dey"
