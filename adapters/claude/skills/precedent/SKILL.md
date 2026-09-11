@@ -29,7 +29,7 @@ An `acr realize` install puts the script beside the skills instead, at
 path either way — prefer that over recomputing it.
 
 `uv` fetches the dependency on first run — there is no install step. If `uv` is
-missing, `pip install grafeo` and run with `python`.
+missing, `pip install graphdblite` and run with `python`.
 
 ## The task skills beside this one
 
@@ -457,8 +457,7 @@ remain the only mechanism for recording.
 ```
 ~/.local/share/precedent/
 ├── journal.jsonl   append-only, fsync'd, one line per decision — source of truth
-├── graph.db        Grafeo graph — a queryable index
-└── .lock           exclusive lock, held for the length of one command
+└── graph.db        graphdblite graph — a queryable index
 ```
 
 To keep it somewhere else — a synced folder, an encrypted volume, a private git
@@ -476,16 +475,25 @@ hook's environment, so exporting it hides the store from priming. It refuses to
 merge two populated stores — concatenating the journals and running `rebuild` is
 a deliberate act, not something a path flag should do behind your back.
 
-The journal exists because the graph engine is young (v0.5.x). If the graph is
-ever corrupted or the engine is abandoned, `precedent.py rebuild` replays the journal
-into a fresh graph and nothing is lost. The journal is plain text, so it also
-diffs and belongs in a private git repo if the user wants history.
+The journal exists because the graph engine is young (0.1.x) and because it
+keeps the engine replaceable. If the graph is ever corrupted or the engine is
+abandoned, `precedent.py rebuild` replays the journal into a fresh graph and
+nothing is lost — that is how the store moved off Grafeo, a rebuild rather than
+a migration. The journal is plain text, so it also diffs and belongs in a
+private git repo if the user wants history.
 
-The lock is not decoration. Two processes on one embedded graph silently lose
-writes — measured at 120 writes across 6 processes leaving 60 stored, with every
-writer reporting success. Every command takes the lock, so concurrent
-sessions — Claude Code, Codex, Cursor, or several of them at once — queue
-instead of clobbering. Never bypass the script to open the graph directly.
+Concurrent sessions are not coordinated by this tool and do not need to be.
+There is no lock: graphdblite serialises writers through SQLite, waiting 5
+seconds before failing loudly rather than dropping a write. Claude Code, Codex
+and Cursor may all be recording at once. `selftest` measures that on Linux,
+macOS and Windows rather than assuming it, because the previous engine lost
+half of 120 concurrent writes in silence.
+
+A store written before that change keeps `graph.db` as a directory; the first
+command that records replays the journal into the new engine and then deletes
+the old graph, so an install that predates the swap cannot keep writing to a
+store nothing else reads. It is kept only when the replay could not read every
+journal entry. Never bypass the script to open the graph directly.
 
 ```bash
 uv run <skill>/../../../../scripts/precedent.py rebuild    # replay journal into a fresh graph

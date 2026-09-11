@@ -99,7 +99,7 @@ worth carrying between projects for years.
 Requires [`uv`](https://docs.astral.sh/uv/) and Python 3.12+. The CLI itself has no install
 step: it is a PEP 723 single file, and `uv` fetches what it needs on first run, then reuses
 a cached environment. (A persistent virtualenv was measured and rejected. It saves 11 ms
-per call, both paths being dominated by the ~50 ms `grafeo` import, and costs an install
+per call, both paths being dominated by the engine import, and costs an install
 step plus an environment to keep in sync.) What differs by agent is how the skills and the
 hook get in front of it.
 
@@ -326,8 +326,7 @@ resolves to the same node; the local path stays as an alias. See `docs/adr/0002`
 ```
 ~/.local/share/precedent/
 ├── journal.jsonl   append-only, fsync'd, one line per decision — source of truth
-├── graph.db        Grafeo graph — a queryable index
-└── .lock           exclusive lock, held for the length of one command
+└── graph.db        graphdblite graph — a queryable index
 ```
 
 Keep it elsewhere (a synced folder, an encrypted volume, a private git checkout) with
@@ -343,22 +342,40 @@ The pointer beats `PRECEDENT_HOME`, which the SessionStart hook never sees. Two 
 stores are never merged silently: `init` stops and tells you to concatenate the journals and
 `rebuild`.
 
-The journal exists because the graph engine is young. If the graph is ever corrupted,
-`precedent.py rebuild` replays the journal into a fresh one and nothing is lost. It is plain
-text, so it also diffs, and belongs in a private git repo if you want history.
+The journal exists because the graph engine is young, and because it makes the engine
+replaceable. If the graph is ever corrupted, `precedent.py rebuild` replays the journal into
+a fresh one and nothing is lost. That escape hatch has been used for real: the store was a
+Grafeo graph until the journal carried it across to graphdblite, which cost a rebuild rather
+than a migration. The journal is plain text, so it also diffs, and belongs in a private git
+repo if you want history.
 
-The lock is not decoration. Two processes on one embedded graph silently lose writes,
-measured at 120 writes across 6 processes leaving 60 stored, with every writer reporting
-success ([GrafeoDB/grafeo#405](https://github.com/GrafeoDB/grafeo/issues/405), filed from
-this work). Every command takes the lock, so concurrent sessions queue instead of clobbering,
-whether that is Claude Code, Codex, Cursor, or several at once.
+Upgrading from a store written before the engine changed needs nothing from you. That store
+keeps `graph.db` as a directory, which the current engine cannot read, so the first command
+that records replays the journal into a new graph and then deletes the old one. It is
+deleted rather than kept because an install that predates the change would otherwise go on
+reading and writing it unseen — two stores that quietly disagree is worse than one that had
+to be rebuilt — and it is safe to delete because the journal it was rebuilt from is
+untouched. A replay that cannot read every entry keeps the old store instead, and says so.
+
+Concurrent sessions are not coordinated by this tool. Several commands run at once by
+design — a SessionStart hook running `brief` while the model runs `check` and you run
+`record`, times however many sessions are open — and there is no file lock. graphdblite
+serialises writers through SQLite and waits 5 seconds before failing loudly. Measured, that
+bound is never approached: 8 processes writing back-to-back never waited past 850 ms.
+
+That is a guarantee this project does not take on trust, because the previous engine did not
+hold it: unlocked, 120 writes across 6 processes stored 60 on macOS and 40 on Linux, every
+writer exiting 0 ([GrafeoDB/grafeo#405](https://github.com/GrafeoDB/grafeo/issues/405), filed
+from this work). So `selftest` measures both properties — that concurrent writers all land,
+and that a reader never sees a half-applied write — on Linux, macOS and Windows in CI, on
+every push.
 
 ### A synced store is not a shared store
 
-The lock is a local file. Two machines writing to one store over Dropbox, iCloud or a network
-mount are not serialised by it. Each sees its own lock file, and `grafeo` silently drops the
-concurrent writes (GrafeoDB/grafeo#405 again: 120 writes across 6 processes, 60 stored,
-nothing raised).
+SQLite serialises writers through the filesystem, and a synced folder is not one. Dropbox,
+iCloud, and network mounts do not carry the locking SQLite relies on; they copy files after
+the fact. Two machines writing to one synced store are not serialised, and the loser is
+whichever copy the sync service resolves away — silently.
 
 Sync the journal, and leave the graph alone. `journal.jsonl` is append-only and merges in
 git, and `precedent.py rebuild` reconstructs the graph from it on each machine. That is the
