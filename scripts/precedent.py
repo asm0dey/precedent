@@ -148,16 +148,7 @@ class Store:
                 f"  the journal is the source of truth — `precedent.py rebuild` "
                 f"replays it into a fresh graph")
         if self._pending_migration is not None:
-            # Loud on stderr, not stdout: `brief`'s stdout is injected into a
-            # model's context by the SessionStart hook, and a migration notice
-            # is not precedent. It still has to be seen, so it is not silent.
-            n, skipped = replay_journal(self)
-            print(f"precedent: graph rebuilt from the journal for the current engine "
-                  f"({n} entries; previous store kept at {self._pending_migration.name})",
-                  file=sys.stderr)
-            for msg in skipped:
-                print(f"  skipped {msg}", file=sys.stderr)
-            self._pending_migration = None
+            self._finish_migration()
         return self
 
     def _migrate_grafeo_store(self) -> None:
@@ -184,9 +175,56 @@ class Store:
                 f"error: {self.db_path} was written by the previous graph engine.\n"
                 f"  run `precedent.py rebuild` (or any command that records) to "
                 f"replay the journal into the current one")
+        # Renamed, not deleted, until the replay has proved itself — see
+        # _finish_migration, which is what actually removes it.
         aside = self.db_path.with_name(f"graph.db.grafeo-{int(time.time())}")
         self.db_path.rename(aside)
         self._pending_migration = aside
+
+    def _finish_migration(self) -> None:
+        """Replay the journal into the new graph, then delete the old one.
+
+        The old store is deleted rather than kept, and the reason is not
+        tidiness. A precedent install that predates the engine swap still
+        opens `graph.db` — a version of this plugin sitting in another
+        agent's directory, an older ACR realisation, a checkout someone has
+        not pulled. Left on disk, the old graph is a live store for those:
+        they would read and write decisions the current engine never sees,
+        and neither side would report anything wrong. Two stores that
+        disagree is worse than one store that had to be rebuilt.
+
+        What makes deleting safe is that the old graph was never the source
+        of truth. `journal.jsonl` is, it is untouched by all of this, and
+        `rebuild` reconstructs the graph from it at any time. Deleting a
+        derived index whose source is intact loses nothing.
+
+        A replay that could not read every entry is the one case where the
+        old store may still hold something the journal does not, so it is
+        kept and named. Everything else about the migration has already been
+        proved by the replay itself.
+        """
+        aside = self._pending_migration
+        self._pending_migration = None
+        assert aside is not None
+        n, skipped = replay_journal(self)
+        # Loud on stderr, not stdout: `brief`'s stdout is injected into a
+        # model's context by the SessionStart hook, and a migration notice is
+        # not precedent. It still has to be seen, so it is not silent.
+        note = f"precedent: graph rebuilt from the journal for the current engine ({n} entries"
+        if skipped:
+            print(f"{note}; {len(skipped)} unreadable, so the previous store is kept "
+                  f"at {aside.name})", file=sys.stderr)
+            for msg in skipped:
+                print(f"  skipped {msg}", file=sys.stderr)
+            return
+        import shutil
+
+        # Sidecars of the old engine go with it, for the same reason: a
+        # half-removed store is still something an old install can open.
+        for path in [aside] + sorted(self.home.glob("graph.db.spill*")):
+            shutil.rmtree(path, ignore_errors=True) if path.is_dir() else path.unlink(missing_ok=True)
+        print(f"{note}; the previous store has been removed — an install that predates "
+              f"this change would otherwise keep writing to it unseen)", file=sys.stderr)
 
     def __exit__(self, *exc):
         try:
@@ -1248,6 +1286,21 @@ def identity_gaps(s: "Store") -> list[dict]:
     return out
 
 
+def superseded_engine_leftovers(s: "Store") -> list[pathlib.Path]:
+    """Store files no current code reads: the pre-swap graph and its sidecars.
+
+    A clean migration deletes the old graph itself (see
+    `Store._finish_migration`), so this is normally empty. It is not always:
+    a replay that could not read every journal entry keeps the old store on
+    purpose, and a migration interrupted partway can leave a sidecar behind.
+    Those survive precisely because something might still be wrong, which is
+    also why they are reported and never deleted here — a report command that
+    removes a user's last copy of anything is the wrong kind of helpful.
+    """
+    return sorted(f for f in s.home.iterdir()
+                  if f.name.startswith("graph.db.") and f.name != "graph.db")
+
+
 def cmd_maintain(a, s: Store) -> None:
     clashes = contradictions_in(s)
     print(f"== contradictions: same project, same topic, two live answers ({len(clashes)}) ==")
@@ -1272,6 +1325,18 @@ def cmd_maintain(a, s: Store) -> None:
         print(f"  {r['tag']:<20} {r['projects']} project(s)")
     print("  two of these that mean the same thing split your history."
           " Spelling variants are listed above; the rest is a judgment call.")
+
+    leftovers = superseded_engine_leftovers(s)
+    print(f"\n== leftovers from the previous graph engine ({len(leftovers)}) ==")
+    if not leftovers:
+        print("  none")
+    else:
+        print("  the journal is the source of truth and the graph was rebuilt from it,")
+        print("  so these are readable by nothing that is still installed:")
+        for f in leftovers:
+            print(f"    {f}")
+        print("  delete them yourself when you are satisfied the history survived —"
+              " `check` and `brief` read the graph, so exercise those first")
 
     untagged = s.q("""MATCH (p:Project)
                       WHERE NOT EXISTS { MATCH (p)-[:TAGGED]->(:Tag) }

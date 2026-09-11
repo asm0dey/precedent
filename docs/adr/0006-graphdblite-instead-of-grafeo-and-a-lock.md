@@ -33,8 +33,20 @@ supported outcome. Silent loss is not, which is the distinction
 Migration cost was one rebuild. The journal is the source of truth, so
 `rebuild` replayed it into the new engine and reproduced every node and edge
 count exactly. A store written by the old engine keeps `graph.db` as a
-directory; the first command that records renames it aside and replays the
-journal, so an upgrade does not need the user to know any of this happened.
+directory; the first command that records renames it aside, replays the
+journal, and then deletes it, so an upgrade does not need the user to know any
+of this happened.
+
+Deleting it is not tidiness. An install that predates the swap still opens
+`graph.db` — another agent's copy of the plugin, an older ACR realisation, a
+checkout nobody pulled — and a readable old store is a live store for those:
+they would read and write decisions this engine never sees, with neither side
+reporting anything wrong. Two stores that disagree is worse than one that had
+to be rebuilt. It is safe to delete because the old graph was never the source
+of truth: `journal.jsonl` is, it is untouched, and `rebuild` reconstructs the
+graph from it at any time. The exception is a replay that could not read every
+entry — the one case where the old store may hold something the journal does
+not — and there it is kept and named.
 
 ## Consequences
 

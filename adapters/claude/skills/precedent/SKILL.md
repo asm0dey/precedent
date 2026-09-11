@@ -490,8 +490,10 @@ macOS and Windows rather than assuming it, because the previous engine lost
 half of 120 concurrent writes in silence.
 
 A store written before that change keeps `graph.db` as a directory; the first
-command that records carries it across and keeps the old one beside it. Never
-bypass the script to open the graph directly.
+command that records replays the journal into the new engine and then deletes
+the old graph, so an install that predates the swap cannot keep writing to a
+store nothing else reads. It is kept only when the replay could not read every
+journal entry. Never bypass the script to open the graph directly.
 
 ```bash
 uv run <skill>/../../../../scripts/precedent.py rebuild    # replay journal into a fresh graph
