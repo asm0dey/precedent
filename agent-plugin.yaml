@@ -1,6 +1,6 @@
 schemaVersion: 1
 name: asm0dey/precedent
-version: 0.3.0
+version: 0.3.1
 description: >-
   Remember and reuse the user's architectural, business and tooling decisions
   across every project, in a queryable graph.
