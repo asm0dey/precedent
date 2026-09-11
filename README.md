@@ -11,6 +11,14 @@ agent while the choice is still on the table.
 
 Works with Claude Code, Codex and Cursor.
 
+- [What it looks like](#what-it-looks-like)
+- [What the agent does with it](#what-the-agent-does-with-it)
+- [Install](#install) — [ACR](#acr-codex-cursor-and-claude-code), [Claude Code plugin](#claude-code-plugin), [manual](#manual-symlink), [the hook](#then-wire-the-session-start-hook)
+- [Is this a memory layer?](#is-this-a-memory-layer) — [how it compares](#how-it-compares), [what it does not do](#what-it-does-not-do)
+- [When precedent does not simply apply](#when-precedent-does-not-simply-apply)
+- [How it finds comparable work](#how-it-finds-comparable-work)
+- [Measured](#measured)
+
 ## What it looks like
 
 A session opens. Before you type anything, the agent is handed this:
