@@ -349,6 +349,14 @@ Grafeo graph until the journal carried it across to graphdblite, which cost a re
 than a migration. The journal is plain text, so it also diffs, and belongs in a private git
 repo if you want history.
 
+Upgrading from a store written before the engine changed needs nothing from you. That store
+keeps `graph.db` as a directory, which the current engine cannot read, so the first command
+that records replays the journal into a new graph and then deletes the old one. It is
+deleted rather than kept because an install that predates the change would otherwise go on
+reading and writing it unseen — two stores that quietly disagree is worse than one that had
+to be rebuilt — and it is safe to delete because the journal it was rebuilt from is
+untouched. A replay that cannot read every entry keeps the old store instead, and says so.
+
 Concurrent sessions are not coordinated by this tool. Several commands run at once by
 design — a SessionStart hook running `brief` while the model runs `check` and you run
 `record`, times however many sessions are open — and there is no file lock. graphdblite
