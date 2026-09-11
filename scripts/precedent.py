@@ -245,8 +245,31 @@ class Store:
 
         # Sidecars of the old engine go with it, for the same reason: a
         # half-removed store is still something an old install can open.
+        #
+        # Removal is verified, not attempted. A store that has ever been
+        # bind-mounted into a container holds root-owned files (see
+        # _ensure_removable, which documents the same hazard for relocate),
+        # and rmtree cannot delete those. Swallowing that error and printing
+        # "removed" would leave the exact stale store this deletes to
+        # prevent, while reporting that it was handled — measured on a real
+        # store, where a root-owned default/data.grafeo survived.
+        stuck = []
         for path in [aside] + sorted(self.home.glob("graph.db.spill*")):
-            shutil.rmtree(path, ignore_errors=True) if path.is_dir() else path.unlink(missing_ok=True)
+            try:
+                shutil.rmtree(path) if path.is_dir() else path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            if path.exists():
+                stuck.append(path)
+        if stuck:
+            print(f"{note}; the previous store could NOT be removed)", file=sys.stderr)
+            for path in stuck:
+                print(f"  still present: {path}", file=sys.stderr)
+            print("  an install predating this change can still open it, and would then "
+                  "read and write decisions this one never sees. Delete it by hand — if "
+                  "it was ever bind-mounted into a container, that needs root.",
+                  file=sys.stderr)
+            return
         print(f"{note}; the previous store has been removed — an install that predates "
               f"this change would otherwise keep writing to it unseen)", file=sys.stderr)
 
