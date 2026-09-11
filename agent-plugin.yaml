@@ -31,6 +31,8 @@ artifacts:
   scripts:
     - id: precedent-cli
       path: scripts/precedent.py
+    - id: statusline
+      path: adapters/claude/hooks/statusline.sh
   hooks:
     - id: session-start
       event: session-start

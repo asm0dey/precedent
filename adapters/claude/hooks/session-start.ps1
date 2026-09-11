@@ -17,6 +17,15 @@ if ($IsWindows -eq $false) { exit 0 }
 
 $ErrorActionPreference = 'SilentlyContinue'
 
+# The statusline badge (hooks/statusline.ps1) renders off a marker named after
+# the directory this hook primed. Dropping it first and writing it back only
+# on a successful, non-empty brief means every early exit below — no CLI, no
+# uv, nothing to say — also clears a badge left by an earlier session.
+$markRoot = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $HOME '.claude' }
+$markDir = Join-Path $markRoot '.precedent-primed'
+$mark = Join-Path $markDir ($PWD.Path -replace '[^A-Za-z0-9-]', '_')
+Remove-Item -LiteralPath $mark -Force -ErrorAction SilentlyContinue
+
 # Resolve the CLI relative to this script, not an assumed install path. Two
 # channels lay it out differently — see the same block in session-start.sh:
 #
@@ -38,6 +47,10 @@ if (-not (Get-Command uv -ErrorAction SilentlyContinue)) { exit 0 }
 
 $brief = (& uv run --quiet $dg brief --project $PWD --only-if-relevant 2>$null) -join "`n"
 if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($brief)) { exit 0 }
+
+# An empty file: the statusline reads only the name, never the contents.
+New-Item -ItemType Directory -Path $markDir -Force -ErrorAction SilentlyContinue | Out-Null
+New-Item -ItemType File -Path $mark -Force -ErrorAction SilentlyContinue | Out-Null
 
 $orders = (& uv run --quiet $dg standing-orders 2>$null) -join "`n"
 if ($LASTEXITCODE -ne 0) { exit 0 }

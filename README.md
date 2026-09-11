@@ -207,6 +207,42 @@ The hook runs a brief for the working directory and injects it, so a session ope
 knowing what you decided here and in comparable projects. It stays quiet where the graph has
 nothing to say, so empty directories cost nothing.
 
+### The statusline badge
+
+A session primed by the hook is otherwise indistinguishable from one that was not, and the
+difference matters: it decides whether the standing orders are in force. `statusline.sh`
+renders `[PRECEDENT]` while the graph is speaking in the current directory.
+
+Claude Code has no plugin-provided statusline — `statusLine` is a field in
+`settings.json`, one command for the whole line — so this is chained into whatever
+statusline you already run rather than installed:
+
+```json
+{
+  "statusLine": {
+    "type": "command",
+    "command": "$HOME/src/precedent/adapters/claude/hooks/statusline.sh"
+  }
+}
+```
+
+With an existing statusline, put it at either end and separate the two:
+
+```json
+{ "type": "command",
+  "command": "your-statusline; printf ' '; $HOME/src/precedent/adapters/claude/hooks/statusline.sh" }
+```
+
+ACR installs it as a script artifact, at
+`.claude/scripts/acr__asm0dey__precedent__statusline/statusline.sh`. Windows without Git
+Bash has the twin, `statusline.ps1`, wired the same way.
+
+The badge is not a decoration on the hook — it is the hook's own state. The SessionStart
+hook drops an empty marker named after the directory it primed, and clears it whenever it
+has nothing to say, so the badge appears exactly when a brief was injected. The statusline
+reads only the marker's name, never its contents, and forks nothing: it runs on every
+render.
+
 ## The skills
 
 `precedent` carries the judgment: what is worth recording, how to read a verdict, when

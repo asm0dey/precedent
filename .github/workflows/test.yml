@@ -57,6 +57,13 @@ jobs:
         # `acr realize` writes.
         run: bash tests/hook-finds-cli.sh
 
+      - name: hook and statusline agree on the badge marker
+        shell: bash
+        # Both sides derive the marker's name from the project path on their
+        # own, and a mismatch is silent by design — no badge and no error. An
+        # exit-code assertion cannot see it, so this asserts the badge itself.
+        run: bash tests/statusline-badge.sh
+
       - name: windows hook adapter runs clean
         if: matrix.os == 'windows-latest'
         shell: pwsh
@@ -71,6 +78,18 @@ jobs:
         run: |
           & "${{ github.workspace }}/adapters/claude/hooks/session-start.ps1"
           if ($LASTEXITCODE -ne 0) { throw "session-start.ps1 exited $LASTEXITCODE" }
+
+      - name: windows statusline adapter runs clean
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        # No marker exists for this directory, so the badge is correctly
+        # empty; what is asserted is that the script reaches that conclusion
+        # rather than throwing on a PowerShell it was not tested against.
+        run: |
+          $out = '{"workspace":{"current_dir":"C:\\nope"}}' |
+            & "${{ github.workspace }}/adapters/claude/hooks/statusline.ps1"
+          if ($LASTEXITCODE -ne 0) { throw "statusline.ps1 exited $LASTEXITCODE" }
+          if ($out) { throw "statusline.ps1 rendered a badge with no marker: $out" }
 
   manifest:
     timeout-minutes: 10

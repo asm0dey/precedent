@@ -14,6 +14,13 @@ set -uo pipefail
 # spelled out; the glob finds it whatever the package is called. A glob that
 # matches nothing stays literal, and the `-f` test then rejects it.
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+
+# The statusline badge (hooks/statusline.sh) renders off a marker named after
+# the directory this hook primed. Dropping it first and writing it back only
+# on a successful, non-empty brief means every early exit below — no CLI, no
+# uv, nothing to say — also clears a badge left by an earlier session.
+MARK="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.precedent-primed/${PWD//[^A-Za-z0-9-]/_}"
+rm -f "$MARK" 2>/dev/null
 DG=""
 for candidate in "$HERE/../../../scripts/precedent.py" \
                  "$HERE"/../../scripts/*/precedent.py; do
@@ -27,6 +34,9 @@ command -v uv >/dev/null 2>&1 || exit 0
 # grepping output whose wording can change.
 BRIEF=$(timeout 20 uv run --quiet "$DG" brief --project "$PWD" --only-if-relevant 2>/dev/null) || exit 0
 [ -n "$BRIEF" ] || exit 0
+
+# An empty file: the statusline reads only the name, never the contents.
+mkdir -p "${MARK%/*}" 2>/dev/null && : > "$MARK" 2>/dev/null
 
 # The standing orders come from the CLI so this hook, SKILL.md and every
 # other adapter cannot drift apart.
