@@ -1,0 +1,14 @@
+{
+  "name": "precedent",
+  "description": "Remember and reuse the user's architectural, business and tooling decisions across every project, in a queryable graph.",
+  "version": "0.3.0",
+  "author": {
+    "name": "asm0dey",
+    "url": "https://github.com/asm0dey"
+  },
+  "homepage": "https://github.com/asm0dey/precedent",
+  "skills": [
+    "./adapters/claude/skills"
+  ],
+  "hooks": "./adapters/claude/hooks/hooks.json"
+}

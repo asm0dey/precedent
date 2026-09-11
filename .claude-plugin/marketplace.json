@@ -1,0 +1,16 @@
+{
+  "name": "precedent",
+  "owner": {
+    "name": "asm0dey",
+    "url": "https://github.com/asm0dey"
+  },
+  "description": "Remember and reuse the user's architectural, business and tooling decisions across every project, in a queryable graph.",
+  "plugins": [
+    {
+      "name": "precedent",
+      "source": "./",
+      "description": "Remember and reuse the user's architectural, business and tooling decisions across every project, in a queryable graph.",
+      "version": "0.3.0"
+    }
+  ]
+}

@@ -48,14 +48,10 @@ from `agent-plugin.yaml` stands; the description of both formats does not:
   Code slash commands under `adapters/claude/commands/` are Claude-only no
   matter what the manifest says.
 - **"Install is `/plugin install` and nothing else" is not true today.** That
-  statement presumes a marketplace listing. No `marketplace.json` has been
-  published anywhere for this project, so there is nothing to run
-  `/plugin install precedent` against yet. The actual Claude Code plugin
-  manifest lives at `adapters/claude/.claude-plugin/plugin.json` — the only
-  location Claude Code will read it from — and carries just
-  `name` / `description` / `version`. It does not enumerate skills, commands,
-  or hooks: Claude Code discovers those by convention from the plugin root
-  (`adapters/claude/`, which is `SKILL.md` at top, `commands/*.md`,
-  `hooks/hooks.json`), the same way `ponytail` and `caveman` are packaged on
-  this machine. `claude plugin validate adapters/claude` is the real
-  verification for this channel, not a marketplace install.
+  statement presumed a marketplace listing, and there was none. It is true now:
+  ADR 0007 adds `.claude-plugin/marketplace.json`, moves the plugin root to the
+  repository root so the install carries `scripts/precedent.py`, and makes
+  `marketplace.json` the second generated projection of this manifest. The
+  plugin manifest carries `name` / `description` / `version` / `author` /
+  `homepage` plus the two adapter paths convention can no longer find; skills
+  and the hook are still not enumerated one by one.
