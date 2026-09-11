@@ -491,8 +491,10 @@ def topic_vocabulary(s: "Store") -> list[dict]:
     caller invents the word fresh each session, so a synonym returns
     nothing; showing the vocabulary is how it corrects itself.
     """
-    return s.q("""MATCH (d:Decision)-[:ABOUT]->(t:Topic)
-                  WHERE d.status='active'
+    return s.q("""MATCH (t:Topic)
+                  WHERE EXISTS { MATCH (:Decision {status:'active'})-[:ABOUT]->(t) }
+                     OR EXISTS { MATCH (:Principle)-[:ABOUT]->(t) }
+                  OPTIONAL MATCH (d:Decision {status:'active'})-[:ABOUT]->(t)
                   RETURN t.name AS topic, count(DISTINCT d) AS decisions
                   ORDER BY decisions DESC, topic""")
 
@@ -1021,18 +1023,34 @@ def cmd_check(a, s: Store) -> None:
               f"   rejected: {','.join(filter(None, r['rejected'])) or '-'}   #{r['id']}")
         if r["why"]:
             print(f"     why: {r['why']}")
+    # A Principle governs its topic through an ABOUT edge, whether or not a
+    # Decision was ever recorded under that topic — and the topic with no
+    # decisions is precisely the one a standing rule exists to answer. Asked
+    # after the empty-topic return below, it answered only the topics that
+    # least needed it.
+    governing = s.q("""MATCH (pr:Principle)-[:ABOUT]->(:Topic {name:$t})
+                       RETURN pr.id AS id, pr.statement AS stmt""", {"t": topic})
     if not rows:
-        print("  nothing recorded under this exact word.")
+        # "nothing recorded" is false when a principle is recorded under it.
+        print("  no decisions recorded under this exact word."
+              if governing else "  nothing recorded under this exact word.")
+    for r in governing:
+        print(f"  PRINCIPLE in play: {r['stmt']}  #{r['id']}")
+
+    if not rows:
         known = topic_vocabulary(s)
+        # A governed topic is settled ground, not new ground — saying
+        # otherwise invites the caller to decide it again from scratch.
+        ground = "it is already governed above." if governing else "this is new ground."
         if known:
             print("\n== topics in use ==")
             for r in known:
                 print(f"  {r['topic']:<24} {r['decisions']} decision(s)")
             print("\n  matching is exact, so a synonym finds nothing. If one of"
                   " these is the same question, re-run with it. If none is,"
-                  " this is new ground.")
+                  f" {ground}")
         else:
-            print("  no decisions recorded anywhere yet — this is new ground.")
+            print(f"  no decisions recorded anywhere yet — {ground}")
         return
 
     if not a.chose:
@@ -1113,11 +1131,6 @@ def cmd_check(a, s: Store) -> None:
         else:
             print(f"  DIVERGENCE: you chose '{r['other']}' for this in"
                   f" {r['n']} other projects{age}")
-
-    violated = s.q("""MATCH (pr:Principle)-[:ABOUT]->(:Topic {name:$t})
-                      RETURN pr.id AS id, pr.statement AS stmt""", {"t": topic})
-    for r in violated:
-        print(f"  PRINCIPLE in play: {r['stmt']}  #{r['id']}")
 
     if not revived and not diverged and not regrets and not endorsed:
         print("  clear — no rejection history, no regret, no divergence from your norm")
@@ -2453,6 +2466,32 @@ def _check_verdicts(s: Store) -> None:
                                           chose="oidc", project=here), s)
         assert "PRINCIPLE" in out2.getvalue(), \
             f"a principle with the topic edge must surface:\n{out2.getvalue()}"
+
+        # Ruling: the topic a principle governs but no decision mentions is
+        # the one a standing rule exists for, and it was the one case that
+        # never reached the principle query — cmd_check returned at the
+        # empty-decision branch first. 'selftest-p-other' has the ABOUT edge
+        # and no Decision, which is exactly that shape.
+        out3 = io.StringIO()
+        with contextlib.redirect_stdout(out3):
+            cmd_check(_argparse.Namespace(topic="selftest-p-other",
+                                          chose="oidc", project=here), s)
+        bare = out3.getvalue()
+        assert "PRINCIPLE" in bare, \
+            f"a principle must surface on a topic with no decisions:\n{bare}"
+        assert "new ground" not in bare, \
+            f"a governed topic is not new ground:\n{bare}"
+        assert "selftest-p-other" in [r["topic"] for r in topic_vocabulary(s)], \
+            "a topic known only to a principle must appear in the vocabulary"
+
+        # The other early return: no --chose means no verdict, but the
+        # principle is context, not verdict, and must survive it.
+        out4 = io.StringIO()
+        with contextlib.redirect_stdout(out4):
+            cmd_check(_argparse.Namespace(topic="selftest-auth",
+                                          chose="", project=here), s)
+        assert "PRINCIPLE" in out4.getvalue(), \
+            f"a principle must surface without --chose:\n{out4.getvalue()}"
     finally:
         s.q("MATCH (pr:Principle {id:'selftest-p'}) DETACH DELETE pr")
         s.q("MATCH (n) WHERE n.id STARTS WITH 'selftest-p' DETACH DELETE n")
