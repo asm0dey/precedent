@@ -13,7 +13,7 @@ Works with Claude Code, Codex and Cursor.
 
 - [What it looks like](#what-it-looks-like)
 - [What the agent does with it](#what-the-agent-does-with-it)
-- [Install](#install) — [ACR](#acr-codex-cursor-and-claude-code), [Claude Code plugin](#claude-code-plugin), [manual](#manual-symlink), [the hook](#then-wire-the-session-start-hook)
+- [Install](#install) — [Claude Code plugin](#claude-code-plugin), [ACR](#acr-codex-cursor-and-claude-code), [manual](#manual-symlink), [the hook](#then-wire-the-session-start-hook)
 - [Is this a memory layer?](#is-this-a-memory-layer) — [how it compares](#how-it-compares), [what it does not do](#what-it-does-not-do)
 - [When precedent does not simply apply](#when-precedent-does-not-simply-apply)
 - [How it finds comparable work](#how-it-finds-comparable-work)
@@ -90,26 +90,6 @@ agent is how the skills and the hook get in front of it.
 Claude Code can take either channel below; Codex and Cursor only ACR. Pick one per machine —
 both channels install the same SessionStart hook, and two of them prime every session twice.
 
-### ACR (Codex, Cursor, and Claude Code)
-
-[ACR](https://github.com/jbaruch/agentic-context-registry) is the only channel that reaches Codex
-and Cursor. It is driven by `agent-plugin.yaml`, which ships the ten skills, the CLI script and
-the session-start hook:
-
-```bash
-acr install github:asm0dey/precedent --agent claude-code   # or codex, or cursor
-acr realize
-```
-
-`install` resolves the latest GitHub release, so a release has to exist. Each of the ten skills
-is its own artifact, and `realize` writes them into the agent's own skills directory:
-`.claude/skills/`, `.codex/skills/` or `.cursor/skills/` as appropriate.
-
-All three agents read those paths, so every skill works on every agent. The realized directories
-carry an ACR prefix (`acr__asm0dey__precedent__precedent-check`), which matters only if you type
-the name: skills fire from their descriptions, and that is how they are meant to fire. Codex
-registers them under their frontmatter name regardless, so `$precedent-check` works there.
-
 ### Claude Code plugin
 
 Two commands, no bootstrap binary:
@@ -129,9 +109,29 @@ looks exactly like a quiet session. Rooting at the repository puts the CLI insid
 tree at the path the hook already resolves in a clone. The cost is that skills and the hook are
 no longer where convention looks, so `.claude-plugin/plugin.json` names both paths.
 
-Both manifests, `plugin.json` and `marketplace.json`, are generated from `agent-plugin.yaml` by
+Both manifests, `plugin.json` and `marketplace.json`, are generated from the ACR manifest below by
 `scripts/gen-plugin-json.py` (`--check` fails CI if they drift, or if a path plugin.json names
 stops existing).
+
+### ACR (Codex, Cursor, and Claude Code)
+
+[ACR](https://github.com/jbaruch/agentic-context-registry) is the only channel that reaches Codex
+and Cursor. It is driven by `agent-plugin.yaml`, which ships the ten skills, the CLI script and
+the session-start hook:
+
+```bash
+acr install github:asm0dey/precedent --agent claude-code   # or codex, or cursor
+acr realize
+```
+
+`install` resolves the latest GitHub release, so a release has to exist. Each of the ten skills
+is its own artifact, and `realize` writes them into the agent's own skills directory:
+`.claude/skills/`, `.codex/skills/` or `.cursor/skills/` as appropriate.
+
+All three agents read those paths, so every skill works on every agent. The realized directories
+carry an ACR prefix (`acr__asm0dey__precedent__precedent-check`), which matters only if you type
+the name: skills fire from their descriptions, and that is how they are meant to fire. Codex
+registers them under their frontmatter name regardless, so `$precedent-check` works there.
 
 ### Manual symlink
 
