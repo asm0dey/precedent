@@ -2967,11 +2967,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def wants_write(a) -> bool:
-    """Whether a parsed command needs the exclusive lock.
+    """Whether a parsed command may change the store.
 
-    Answered before the Store exists, because it has to be: ReadWriteLock
-    refuses to promote a read lock to a write lock, deliberately, so a command
-    settles which one it wants before it takes either.
+    Answered before the Store exists because Store takes it as an argument.
+    It used to pick a lock mode, and had to be settled up front because
+    ReadWriteLock refuses to promote a read lock to a write lock; with the
+    lock gone it decides whether a command may migrate a store written by the
+    previous engine — see Store._migrate_grafeo_store.
     """
     if a.cmd == "maintain":
         # --apply deletes orphan nodes; without it maintain only reports.

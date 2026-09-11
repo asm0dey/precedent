@@ -14,6 +14,12 @@ WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
 export PRECEDENT_HOME="$WORK/store"
+# The hook drops a statusline marker under CLAUDE_CONFIG_DIR. Unset, that is
+# the developer's real ~/.claude, so every run of this test left a marker
+# there naming a temp directory that no longer exists — litter this test
+# creates and never cleans up. Both of the store's locations belong inside
+# $WORK, not just the graph.
+export CLAUDE_CONFIG_DIR="$WORK/claude"
 PROJECT="$WORK/proj"
 mkdir -p "$PROJECT"
 
