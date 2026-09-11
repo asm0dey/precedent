@@ -25,9 +25,14 @@ macOS is the row that decided it. The Grafeo tear never reproduced on Linux, so
 a clean Linux run proves nothing; the control tearing on macOS in the same
 harness, on the same machine, minutes apart, is what makes the zero meaningful.
 
-The 30-second bound the lock enforced survives as `BUSY_TIMEOUT_MS`: SQLite
-waits that long for another writer and then raises. Loud contention is a
-supported outcome. Silent loss is not, which is the distinction
+`BUSY_TIMEOUT_MS` is 5s, not the lock's inherited 30s. The lock was held for a
+whole command, so 30s was a real bound on a real wait; nothing holds the
+database across statements now. Measured at 8 processes writing back-to-back,
+nothing waits past ~850 ms even when allowed thirty seconds, and everything
+from 1s up records zero errors. 5s keeps a margin over the measurement and
+stays under the SessionStart hook's own 20s timeout, so a genuinely stuck
+command reports rather than being killed mid-write. Loud contention is a
+supported outcome; silent loss is not, which is the distinction
 `_check_concurrent_writers` asserts.
 
 Migration cost was one rebuild. The journal is the source of truth, so

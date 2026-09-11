@@ -352,8 +352,8 @@ repo if you want history.
 Concurrent sessions are not coordinated by this tool. Several commands run at once by
 design — a SessionStart hook running `brief` while the model runs `check` and you run
 `record`, times however many sessions are open — and there is no file lock. graphdblite
-serialises writers through SQLite and waits 30 seconds before failing loudly, which is the
-same bound the file lock used to enforce.
+serialises writers through SQLite and waits 5 seconds before failing loudly. Measured, that
+bound is never approached: 8 processes writing back-to-back never waited past 850 ms.
 
 That is a guarantee this project does not take on trust, because the previous engine did not
 hold it: unlocked, 120 writes across 6 processes stored 60 on macOS and 40 on Linux, every

@@ -105,11 +105,35 @@ def resolve_home(home: pathlib.Path) -> pathlib.Path:
 
 class Store:
     # How long a command waits for another process's write before giving up.
-    # Kept at the old file lock's 30s on purpose: the number was chosen so a
-    # slow `rebuild` cannot hang a SessionStart `brief` forever, and that
-    # reasoning did not change when the thing enforcing it did. SQLite raises
-    # after this; nothing waits indefinitely and nothing fails silently.
-    BUSY_TIMEOUT_MS = 30_000
+    #
+    # This was 30s, inherited from the file lock, where it was the right
+    # number: that lock was held for a whole command, so a slow `rebuild`
+    # really could make a `brief` wait that long. Nothing holds the database
+    # across statements any more — each one is its own SQLite transaction —
+    # so waits are per-statement and the inherited number was measuring a
+    # world that no longer exists.
+    #
+    # Measured, 8 processes opening the store and writing back-to-back for 4
+    # seconds, which is far harsher than N agent sessions recording:
+    #
+    #     timeout      writes   errors   slowest call
+    #        10ms       9,425      618           38ms
+    #        50ms       9,738       84           85ms
+    #       250ms       9,806        2          260ms
+    #      1,000ms      9,464        0          630ms
+    #      5,000ms     10,646        0          832ms
+    #     30,000ms     10,286        0          850ms
+    #
+    # Nothing ever waited past ~850ms even when allowed thirty seconds: the
+    # queue drains, so the rest of the budget is unreachable. 5s is the first
+    # round number with a comfortable margin over that, and it sits below the
+    # SessionStart hook's own 20s timeout — so a command that really is stuck
+    # reports for itself instead of being killed mid-write with no message.
+    #
+    # Pinned rather than left to the engine's default, which is 5s today: a
+    # release that changed it would change this tool's behaviour under
+    # contention, silently.
+    BUSY_TIMEOUT_MS = 5_000
 
     def __init__(self, home: pathlib.Path = HOME, write: bool = True):
         home.mkdir(parents=True, exist_ok=True)

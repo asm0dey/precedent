@@ -483,7 +483,7 @@ a migration. The journal is plain text, so it also diffs and belongs in a
 private git repo if the user wants history.
 
 Concurrent sessions are not coordinated by this tool and do not need to be.
-There is no lock: graphdblite serialises writers through SQLite, waiting 30
+There is no lock: graphdblite serialises writers through SQLite, waiting 5
 seconds before failing loudly rather than dropping a write. Claude Code, Codex
 and Cursor may all be recording at once. `selftest` measures that on Linux,
 macOS and Windows rather than assuming it, because the previous engine lost
