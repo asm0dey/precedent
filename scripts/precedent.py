@@ -1998,7 +1998,12 @@ def _check_concurrent_writers() -> None:
         "        raised += 1\n"
         "print(json.dumps({'stored': stored, 'raised': raised}), flush=True)\n")
 
-    with tempfile.TemporaryDirectory() as tmp:
+    # ignore_cleanup_errors: these checks fork processes that hold the store
+    # open and then kill them, and Windows refuses to delete a file whose
+    # handle has not drained yet — observed as WinError 32 on windows-latest
+    # after a passing check. A few KB left in the temp directory is not worth
+    # a red build that says nothing about the property under test.
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         home = pathlib.Path(tmp) / "home"
         with Store(home, write=True):
             pass                      # create the store before racing on it
@@ -2136,7 +2141,12 @@ def _check_reader_isolation() -> None:
         "                torn.append([r['a'], r['b']])\n"
         "print(json.dumps({'distinct': len(seen), 'torn': torn[:5]}), flush=True)\n")
 
-    with tempfile.TemporaryDirectory() as tmp:
+    # ignore_cleanup_errors: these checks fork processes that hold the store
+    # open and then kill them, and Windows refuses to delete a file whose
+    # handle has not drained yet — observed as WinError 32 on windows-latest
+    # after a passing check. A few KB left in the temp directory is not worth
+    # a red build that says nothing about the property under test.
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         # A `home` for Store to build graph.db/journal.jsonl under —
         # never the real store; each run gets a fresh, disposable one.
         home = pathlib.Path(tmp) / "home"
