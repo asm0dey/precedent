@@ -1,4 +1,8 @@
-# precedent
+# <img src="assets/logo.svg" width="38" align="top" alt=""> precedent
+
+[![test](https://github.com/asm0dey/precedent/actions/workflows/test.yml/badge.svg)](https://github.com/asm0dey/precedent/actions/workflows/test.yml)
+[![license](https://img.shields.io/github/license/asm0dey/precedent)](LICENSE)
+[![version](https://img.shields.io/github/v/tag/asm0dey/precedent?label=version)](https://github.com/asm0dey/precedent/tags)
 
 `precedent` gives your coding agent a memory of the architectural, business and tooling
 choices you have settled — across every project, for years — and puts them back in front of
