@@ -40,6 +40,12 @@ from datetime import date
 DEFAULT_HOME = pathlib.Path.home() / ".local/share/precedent"
 HOME = pathlib.Path(os.environ.get("PRECEDENT_HOME", DEFAULT_HOME))
 SCOPES = ("architecture", "business", "process", "tooling", "product")
+# The fields an amendment may rewrite: how the decision was DESCRIBED.
+# Everything else on a Decision — its topics, its options, its scope, the
+# project it belongs to — is WHAT WAS DECIDED, and changing one of those is a
+# different decision, which is `record --supersedes`. Also the whitelist that
+# makes apply_amend's f-string SET clause safe.
+AMENDABLE = ("title", "statement", "rationale")
 POINTER = "location"
 # The STANDING_ORDERS banner is this script's one copy; the session-start hook
 # and SKILL.md both fetch it via `standing-orders` rather than holding their
@@ -770,6 +776,71 @@ def cmd_record(a, s: Store) -> None:
               " as precedent anywhere. Tag it: precedent.py tag --project . --add <tags>")
 
 
+def cmd_amend(a, s: Store) -> None:
+    """Same decision, better words.
+
+    Distinct from supersede on purpose, and the distinction is the whole
+    point. `--supersedes` models a decision that CHANGED: it writes a second
+    decision, marks the first superseded, and `check` carries both, because
+    when you revisit the call in two years the old reasoning is the most
+    valuable thing in the graph. A decision that was merely DESCRIBED badly
+    has no such history, and superseding one asserts a change that never
+    happened — in the field `check` prints first and quotes back.
+
+    Only the words change; see AMENDABLE for why that is the line.
+
+    The id never changes, including the stale title slug inside it. The id is
+    identity and the slug within it is an accident of how it was minted —
+    the same split as Project.portable against Project.id (docs/adr/0002).
+    Anything already holding the old id keeps resolving: a SUPERSEDES edge,
+    a rule file, a commit message.
+
+    Journal first, then mutate, exactly as `record` does: a crash between the
+    two costs a replay, not the amendment.
+    """
+    rows = s.q("""MATCH (d:Decision {id:$id})
+                  RETURN d.title AS title, d.statement AS statement,
+                         d.rationale AS rationale""", {"id": a.id})
+    if not rows:
+        # Exact matching, like everywhere else (docs/adr/0001). Guessing at a
+        # near id here would amend the wrong decision, which is the one
+        # outcome worse than amending none.
+        print(f"no decision with id {a.id!r} — ids are printed by `check --topic <topic>`"
+              f" and by `brief`, after the '#'")
+        raise SystemExit(2)
+    was = rows[0]
+    fields = {k: getattr(a, k) for k in AMENDABLE if getattr(a, k)}
+    if not fields:
+        print("nothing to amend — pass at least one of "
+              + ", ".join(f"--{k}" for k in AMENDABLE))
+        raise SystemExit(2)
+
+    payload = {"id": a.id, **fields}
+    s.log("amend", payload)
+    apply_amend(s, payload)
+
+    print(f"amended {a.id}")
+    # Both halves, because the user cannot see the graph and this is a write
+    # to the text that gets quoted as their own words. A wrong entry is worse
+    # than a missing one, so the confirmation shows what it replaced.
+    for k, new in fields.items():
+        print(f"  {k}")
+        print(f"    was: {was[k] or '-'}")
+        print(f"    now: {new}")
+    # cmd_record sets statement to `a.statement or a.title`, so a decision
+    # recorded without an explicit --statement carries the title verbatim in
+    # both fields. When --title alone is amended, that old statement survives
+    # untouched — and references/schema.md documents statement as a queryable
+    # Decision property, so a `cypher` escape hatch would resurface exactly
+    # the wording the amendment was meant to retire. Fixing this by silently
+    # also rewriting statement would be worse: it changes a field the user
+    # never named, which is the kind of magic this tool exists to not do. A
+    # note is the whole fix.
+    if "title" in fields and "statement" not in fields and was["statement"] == was["title"]:
+        print(f'  note: statement still reads "{was["statement"]}" — it was a copy of the old')
+        print("        title. Pass --statement to reword it too.")
+
+
 def cmd_regret(a, s: Store) -> None:
     """Mark a choice you repeated as one you now consider a mistake.
 
@@ -816,6 +887,33 @@ def apply_regret(s: Store, e: dict) -> None:
         s.q("MATCH (d:Decision {id:$id}) SET d.status='regretted'", {"id": did})
         s.q("""MATCH (l:Lesson {id:$lid}),(d:Decision {id:$did})
                MERGE (l)-[:REGRETS]->(d)""", {"lid": e["id"], "did": did})
+
+
+def apply_amend(s: Store, e: dict) -> None:
+    """Fold an amendment onto the decision it rewords.
+
+    MATCH, never MERGE. An amendment describes a decision that already
+    exists; a MERGE would fabricate a bare node carrying nothing but a new
+    title whenever the `record` line above it was unreadable — inventing
+    precedent out of a rewording, which `check` would then quote with no
+    rationale and no options beside it. `project_portable` refuses to create
+    a node for the same reason. Journal order guarantees the `record` line
+    is replayed first, so a miss here means that line was skipped, and
+    `replay_journal` has already reported it.
+
+    Only the keys present are written: an absent key means "unchanged", so
+    `amend --title` cannot silently blank a rationale that took a year to
+    earn. An amendment with no fields is a no-op rather than an empty SET
+    clause, which does not parse.
+
+    The SET clause is interpolated, its values are not: field names come
+    from AMENDABLE and nowhere else, every value goes through a parameter.
+    """
+    fields = {k: e[k] for k in AMENDABLE if k in e}
+    if not fields:
+        return
+    clause = ", ".join(f"d.{k}=${k}" for k in fields)
+    s.q(f"MATCH (d:Decision {{id:$id}}) SET {clause}", {"id": e["id"], **fields})
 
 
 def cmd_principle(a, s: Store) -> None:
@@ -1560,6 +1658,8 @@ def replay_entry(s: Store, e: dict) -> None:
             {"id": e["project_id"], "pp": e["portable"]})
     elif e["op"] == "regret":
         apply_regret(s, e)
+    elif e["op"] == "amend":
+        apply_amend(s, e)
     elif e["op"] == "principle":
         s.q("""MERGE (pr:Principle {id:$id})
                SET pr.statement=$statement, pr.created=$ts""", e)
@@ -2259,6 +2359,7 @@ def _check_lock_modes() -> None:
         # writers
         "record": True, "tag": True, "regret": True, "principle": True,
         "rebuild": True, "selftest": True,
+        "amend": True,          # rewords a decision in place
         "brief": True,          # the portable-id backfill mutates
         "cypher": True,         # arbitrary query text; CREATE is unknowable up front
         "init": True,           # returns before any Store is opened
@@ -2278,6 +2379,22 @@ def _check_lock_modes() -> None:
     # and the flag still reaches the mode for an ordinary reader and writer
     assert wants_write(p.parse_args(["check", "--topic", "t"])) is False
     assert wants_write(p.parse_args(["record", "--title", "t"])) is True
+
+    # AMENDABLE is documented as the single whitelist of fields `amend` can
+    # reword, but it is not the only place that knows the three names:
+    # cmd_amend's `was` query and this `amend` subparser's --flags each spell
+    # them out by hand. Binding AMENDABLE to the subparser's actual options
+    # here means a fourth member added to AMENDABLE without updating both
+    # other sites fails the suite instead of raising AttributeError on the
+    # first `amend --<new-field>` a user tries.
+    amend_dests = {act.dest for act in subparsers[0].choices["amend"]._actions
+                   if act.dest not in ("help", "id")}
+    assert amend_dests == set(AMENDABLE), (
+        "AMENDABLE and the `amend` subparser's --flags have drifted apart — "
+        f"got {amend_dests}, expected {set(AMENDABLE)}. AMENDABLE is meant to "
+        "be the single whitelist: update the matching add_argument calls in "
+        "build_parser's `amend` subparser and the was-query in cmd_amend "
+        "alongside it.")
 
 
 def _check_journal(s: Store) -> None:
@@ -2308,6 +2425,66 @@ def _check_journal(s: Store) -> None:
     assert s.q("MATCH (d:Decision {id:'selftest-noversion'}) RETURN d.id AS id") \
         == [{"id": "selftest-noversion"}], "a v-less entry must still replay as v1"
     s.q("MATCH (n) WHERE n.id STARTS WITH 'selftest-noversion' DETACH DELETE n")
+
+
+def _check_amend(s: Store) -> None:
+    """An amendment must rewrite the words and nothing else.
+
+    `check` prints the title first, so a misleading title is the expensive
+    error — it is the part that gets quoted back as precedent. What makes
+    amending safe to reach for instead of superseding is that it cannot
+    touch what was decided: an amendment able to move a CHOSE edge would be
+    a silent rewrite of history in the one tool whose value is that history
+    is not rewritten.
+    """
+    d = {"id": "selftest-amend", "title": "narrow title", "statement": "s",
+         "rationale": "r", "scope": "architecture", "created": today(),
+         "project_id": "selftest-amend-proj", "project_name": "selftest",
+         "tags": [], "topics": ["selftest-amend-topic"],
+         "chose": ["selftest-amend-opt"], "rejected": [], "supersedes": []}
+    try:
+        write_decision(s, d)
+        apply_amend(s, {"id": "selftest-amend", "title": "wider title"})
+        assert s.q("""MATCH (d:Decision {id:'selftest-amend'})
+                      RETURN d.title AS t, d.statement AS st,
+                             d.rationale AS r""") \
+            == [{"t": "wider title", "st": "s", "r": "r"}], \
+            "an absent field means unchanged, never cleared"
+        assert s.q("""MATCH (:Decision {id:'selftest-amend'})-[:CHOSE]->(o:Option)
+                      RETURN o.name AS n""") == [{"n": "selftest-amend-opt"}], \
+            "an amendment must not touch what was decided"
+        assert s.q("MATCH (d:Decision {id:'selftest-amend'}) RETURN d.status AS st") \
+            == [{"st": "active"}], "an amendment is not a supersession"
+
+        # Replayed from a journal line it must land identically: the graph is
+        # rebuilt from these lines and from nothing else, so an op that works
+        # only when called directly is an amendment that disappears on the
+        # next `rebuild` — and the old wording comes back.
+        replay_entry(s, {"op": "amend", "id": "selftest-amend",
+                         "rationale": "replayed reason", "v": SCHEMA})
+        assert s.q("""MATCH (d:Decision {id:'selftest-amend'})
+                      RETURN d.rationale AS r""") == [{"r": "replayed reason"}]
+
+        # An id that is not there must not be invented. A rewording is not a
+        # decision, and a bare node carrying only a title would be precedent
+        # nobody ever recorded — quoted back with full confidence.
+        replay_entry(s, {"op": "amend", "id": "selftest-amend-ghost",
+                         "title": "ghost", "v": SCHEMA})
+        assert s.q("MATCH (d:Decision {id:'selftest-amend-ghost'}) RETURN d.id AS id") \
+            == [], "amend must never create a Decision"
+
+        # An empty amendment is a no-op, not a query with an empty SET clause
+        # (which does not parse). cmd_amend refuses this case up front, but a
+        # journal line is not under its control.
+        apply_amend(s, {"id": "selftest-amend"})
+        assert s.q("""MATCH (d:Decision {id:'selftest-amend'})
+                      RETURN d.title AS t""") == [{"t": "wider title"}]
+    finally:
+        s.q("MATCH (n) WHERE n.id STARTS WITH 'selftest-amend' DETACH DELETE n")
+        for name in ("selftest-amend-topic", "selftest-amend-opt"):
+            s.q("""MATCH (n) WHERE (n:Topic OR n:Option) AND n.name = $name
+                     AND NOT EXISTS { MATCH (n)<--() } DETACH DELETE n""",
+                {"name": name})
 
 
 def _check_verdicts(s: Store) -> None:
@@ -2881,6 +3058,7 @@ def cmd_selftest(a, s: Store) -> None:
     _check_export(s)
     _check_concurrent_writers()
     _check_journal(s)
+    _check_amend(s)
     _check_lock_modes()
     _check_reader_isolation()
     _check_verdicts(s)
@@ -2923,6 +3101,15 @@ def build_parser() -> argparse.ArgumentParser:
                    help="decision ids departed from (inferred from --topic if omitted)")
     r.add_argument("--id", default="")
     proj(r); r.set_defaults(writes=True, fn=cmd_record)
+
+    am = sub.add_parser("amend",
+                        help="reword a decision — same decision, better words")
+    am.add_argument("--id", required=True,
+                    help="the decision id, as printed by `check` and `brief` after the '#'")
+    am.add_argument("--title", default="")
+    am.add_argument("--statement", default="")
+    am.add_argument("--rationale", default="")
+    am.set_defaults(writes=True, fn=cmd_amend)
 
     b = sub.add_parser("brief", help="project type, decisions here, precedent from similar projects")
     b.add_argument("--min-shared", type=int, default=1,

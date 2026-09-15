@@ -26,6 +26,10 @@ acknowledged in that project and unchanged everywhere else. Filter on `status='a
 query that answers "what is true now" — superseded decisions are kept
 deliberately and will otherwise pollute the result.
 
+`title`, `statement` and `rationale` are the only properties `amend` rewrites;
+`status`, `scope` and `created` are not amendable, and neither are any of a
+decision's edges.
+
 A project's kind is a SET of `Tag` nodes, not a property. Tags are free-form
 strings supplied by the agent, never inferred from dependencies, and are written
 only by `precedent.py tag --add`. A project with no tags never appears as precedent.
@@ -142,8 +146,8 @@ that is what keeps every line written before versioning replayable — and
 REFUSES a line whose `v` exceeds `SCHEMA`, stopping the rebuild rather than
 guessing at keys it does not know.
 
-`op` is `record`, `project_tags`, `project_portable`, `tag_merge`, `regret` or
-`principle`; the pre-tag `project_type` and the retired `tags_distinct` are still
+`op` is `record`, `amend`, `project_tags`, `project_portable`, `tag_merge`, `regret`
+or `principle`; the pre-tag `project_type` and the retired `tags_distinct` are still
 replayed so old journals keep working. The list is exhaustive: `replay_entry`
 raises on an op it does not know rather than counting a silent no-op as a
 successful replay, so a new op must be added there and here together.
@@ -161,3 +165,31 @@ and `project_tags` lines carry them**, and `replay_entry` resolves through them
 on either — a tag line that arrived without them would create a second node for
 the same repo. A line written before they existed carries neither, and falls
 back to `project_id` — the native path — exactly as it did then.
+
+`amend` rewords a decision that is already recorded — same decision, better
+words — and carries `id` plus any subset of `title`, `statement` and
+`rationale`:
+
+```json
+{"ts":"2026-09-15T11:04:02","op":"amend","id":"notify4j-core-for-multi-channel-booking-notifica-1789206712",
+ "title":"notify4j-core for all outbound third-party delivery","v":1}
+```
+
+A key that is absent is unchanged, never cleared, so an amendment to a title
+cannot blank a rationale. Nothing else on the decision is amendable: topics,
+options, scope and project are *what was decided*, and changing one of those
+is a different decision, recorded with `record --supersedes`.
+
+It replays as `MATCH ... SET` — never a `MERGE`, for the same reason
+`project_portable` does not: an amendment must not fabricate a decision out of
+a rewording when the `record` line above it was unreadable. Journal order puts
+that line first, so a miss means it was skipped and already reported.
+
+The id does not change, including the now-stale title slug inside it. See
+`docs/adr/0008`.
+
+Amending does NOT bump `v`. An older precedent replaying a journal that
+contains an `amend` line raises on the unknown op, and `replay_journal`
+reports that one line as skipped and continues; bumping the schema would
+instead make it refuse every line written from that point on, `record`
+lines included.

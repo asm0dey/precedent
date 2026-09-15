@@ -29,6 +29,13 @@ Replacing a decision with a later one on the same question. The old decision is
 kept with its rationale intact and stops counting as current.
 _Avoid_: update, overwrite, revision
 
+**Amendment**:
+A restatement of how a Decision was *described*, leaving what was decided
+untouched. Distinct from Supersession, which records that the decision itself
+changed: an amendment asserts no history, because none happened. The id
+survives it.
+_Avoid_: edit, fix, correction, revision
+
 **Regret**:
 A judgment that a choice was wrong *everywhere it was made*. It inverts
 precedent: the repetitions become evidence that the lesson was expensive rather

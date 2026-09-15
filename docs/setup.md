@@ -160,6 +160,7 @@ call (see `docs/adr/0001`).
 |---|---|
 | `brief` | project type, decisions here, precedent from similar projects — what the hook injects |
 | `record` | write a decision (`--topic --chose --rationale --rejected --despite --supersedes`) |
+| `amend` | reword a decision already recorded — same decision, better words (`--id --title --statement --rationale`) |
 | `check` | precedent for a topic, plus a conflict verdict (`--topic --chose`) |
 | `suggest` | decisions not yet made here, and principle candidates |
 | `tag` | list the tag vocabulary, or change this project's tags |
