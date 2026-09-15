@@ -776,6 +776,59 @@ def cmd_record(a, s: Store) -> None:
               " as precedent anywhere. Tag it: precedent.py tag --project . --add <tags>")
 
 
+def cmd_amend(a, s: Store) -> None:
+    """Same decision, better words.
+
+    Distinct from supersede on purpose, and the distinction is the whole
+    point. `--supersedes` models a decision that CHANGED: it writes a second
+    decision, marks the first superseded, and `check` carries both, because
+    when you revisit the call in two years the old reasoning is the most
+    valuable thing in the graph. A decision that was merely DESCRIBED badly
+    has no such history, and superseding one asserts a change that never
+    happened — in the field `check` prints first and quotes back.
+
+    Only the words change; see AMENDABLE for why that is the line.
+
+    The id never changes, including the stale title slug inside it. The id is
+    identity and the slug within it is an accident of how it was minted —
+    the same split as Project.portable against Project.id (docs/adr/0002).
+    Anything already holding the old id keeps resolving: a SUPERSEDES edge,
+    a rule file, a commit message.
+
+    Journal first, then mutate, exactly as `record` does: a crash between the
+    two costs a replay, not the amendment.
+    """
+    rows = s.q("""MATCH (d:Decision {id:$id})
+                  RETURN d.title AS title, d.statement AS statement,
+                         d.rationale AS rationale""", {"id": a.id})
+    if not rows:
+        # Exact matching, like everywhere else (docs/adr/0001). Guessing at a
+        # near id here would amend the wrong decision, which is the one
+        # outcome worse than amending none.
+        print(f"no decision with id {a.id!r} — ids are printed by `check --topic <topic>`"
+              f" and by `brief`, after the '#'")
+        raise SystemExit(2)
+    was = rows[0]
+    fields = {k: getattr(a, k) for k in AMENDABLE if getattr(a, k)}
+    if not fields:
+        print("nothing to amend — pass at least one of "
+              + ", ".join(f"--{k}" for k in AMENDABLE))
+        raise SystemExit(2)
+
+    payload = {"id": a.id, **fields}
+    s.log("amend", payload)
+    apply_amend(s, payload)
+
+    print(f"amended {a.id}")
+    # Both halves, because the user cannot see the graph and this is a write
+    # to the text that gets quoted as their own words. A wrong entry is worse
+    # than a missing one, so the confirmation shows what it replaced.
+    for k, new in fields.items():
+        print(f"  {k}")
+        print(f"    was: {was[k] or '-'}")
+        print(f"    now: {new}")
+
+
 def cmd_regret(a, s: Store) -> None:
     """Mark a choice you repeated as one you now consider a mistake.
 
@@ -2294,6 +2347,7 @@ def _check_lock_modes() -> None:
         # writers
         "record": True, "tag": True, "regret": True, "principle": True,
         "rebuild": True, "selftest": True,
+        "amend": True,          # rewords a decision in place
         "brief": True,          # the portable-id backfill mutates
         "cypher": True,         # arbitrary query text; CREATE is unknowable up front
         "init": True,           # returns before any Store is opened
@@ -3019,6 +3073,15 @@ def build_parser() -> argparse.ArgumentParser:
                    help="decision ids departed from (inferred from --topic if omitted)")
     r.add_argument("--id", default="")
     proj(r); r.set_defaults(writes=True, fn=cmd_record)
+
+    am = sub.add_parser("amend",
+                        help="reword a decision — same decision, better words")
+    am.add_argument("--id", required=True,
+                    help="the decision id, as printed by `check` and `brief` after the '#'")
+    am.add_argument("--title", default="")
+    am.add_argument("--statement", default="")
+    am.add_argument("--rationale", default="")
+    am.set_defaults(writes=True, fn=cmd_amend)
 
     b = sub.add_parser("brief", help="project type, decisions here, precedent from similar projects")
     b.add_argument("--min-shared", type=int, default=1,
