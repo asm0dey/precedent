@@ -2380,6 +2380,22 @@ def _check_lock_modes() -> None:
     assert wants_write(p.parse_args(["check", "--topic", "t"])) is False
     assert wants_write(p.parse_args(["record", "--title", "t"])) is True
 
+    # AMENDABLE is documented as the single whitelist of fields `amend` can
+    # reword, but it is not the only place that knows the three names:
+    # cmd_amend's `was` query and this `amend` subparser's --flags each spell
+    # them out by hand. Binding AMENDABLE to the subparser's actual options
+    # here means a fourth member added to AMENDABLE without updating both
+    # other sites fails the suite instead of raising AttributeError on the
+    # first `amend --<new-field>` a user tries.
+    amend_dests = {act.dest for act in subparsers[0].choices["amend"]._actions
+                   if act.dest not in ("help", "id")}
+    assert amend_dests == set(AMENDABLE), (
+        "AMENDABLE and the `amend` subparser's --flags have drifted apart — "
+        f"got {amend_dests}, expected {set(AMENDABLE)}. AMENDABLE is meant to "
+        "be the single whitelist: update the matching add_argument calls in "
+        "build_parser's `amend` subparser and the was-query in cmd_amend "
+        "alongside it.")
+
 
 def _check_journal(s: Store) -> None:
     """A journal written by a newer precedent must stop the replay, not
