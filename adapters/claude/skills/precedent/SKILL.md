@@ -92,13 +92,17 @@ sentence and move on, and you are the one who has to notice:
 | "X was a mistake", "X bit us", "never again", "I regret X" | a lesson, not a new decision | `regret` |
 | "I know I usually do X, but here…" | a knowing exception | `record --despite` |
 | "actually, for this project, X now" | a replacement in one project | `record --supersedes` |
+| "that's not what I meant", "the title is too narrow", "reword that" | a rewording, not a new decision | `amend` |
 | "none of this repo's decisions are in there" | a backfill | `precedent-analyze` |
 
-The two that get confused are the third and fifth. Changing your mind in one
-project is `--supersedes`: the old choice stays a norm everywhere else. Deciding
-the *pattern* was wrong is `regret`: it marks every project that made that
-choice and stops the graph arguing for it again. Ask which one they mean when
-the sentence is ambiguous — "we're moving off mongo" is either.
+Three of these get confused. Changing your mind in one project is `--supersedes`:
+the old choice stays a norm everywhere else. Deciding the *pattern* was wrong is
+`regret`: it marks every project that made that choice and stops the graph
+arguing for it again. Deciding the *words* were wrong is `amend`: nothing about
+the choice changed, so nothing is superseded and no second entry appears. Ask
+which one they mean when the sentence is ambiguous — "we're moving off mongo" is
+either of the first two, and "that's not really what I decided" is usually the
+third rather than a new decision.
 
 Offer, do not act. Draft the command, show the one-line summary, run it when
 they confirm.
@@ -226,7 +230,7 @@ choices with no alternative, and preferences that will not outlive the session.
 
 ### 3a. When precedent does not simply apply
 
-Three different things get confused with each other, and they want different
+Four different things get confused with each other, and they want different
 records. Pick by what is actually true:
 
 | The situation | What to run | What it changes |
@@ -234,11 +238,20 @@ records. Pick by what is actually true:
 | The precedent is sound, but **this project is genuinely different** | `record --despite "<why this project differs>"` | Warning is answered here, and only here |
 | The choice was right then and is **wrong now, in this project** | `record --supersedes <id>` | Old decision marked superseded, reasoning kept |
 | The choice was **wrong everywhere**, and you repeated it | `regret --topic … --chose … --because "<lesson>"` | Every instance marked regretted; the verdict inverts |
+| The choice was right — the **record of it reads wrong** | `amend --id <id> --title "<better words>"` | Only the wording; no second decision, no supersession, id unchanged |
 
 The first is the one people skip, and skipping it is expensive. Diverge without
 recording why and the graph reports `DIVERGENCE` in that project forever — a
 warning that is correct, unanswerable and permanent, which is exactly how a
 useful signal becomes noise the user learns to scroll past.
+
+The fourth is the one to reach for whenever the correction is to a description
+rather than to a choice, and the cheap mistake is superseding instead. A
+supersession writes a second decision and makes `check` carry both — an
+assertion that the call was revisited. For a rewording that history never
+happened, and it is asserted in the line `check` quotes first. Amend takes
+`--title`, `--statement` and `--rationale`; anything else — a different option,
+a different topic — is a different decision, so that really is `--supersedes`.
 
 ```bash
 uv run <skill>/../../../../scripts/precedent.py record --project . \

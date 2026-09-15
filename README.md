@@ -210,7 +210,7 @@ carrying between projects for years.
 
 ## When precedent does not simply apply
 
-Three situations get confused with each other, and each wants a different record. You say the
+Four situations get confused with each other, and each wants a different record. You say the
 ordinary sentence; the agent picks the right one.
 
 | The situation | What gets recorded |
@@ -218,6 +218,7 @@ ordinary sentence; the agent picks the right one.
 | The precedent is sound, but **this project is genuinely different** | a decision *despite* the precedent |
 | The choice was right then and is **wrong now, here** | a decision that *supersedes* the old one |
 | The choice was **wrong everywhere**, and you repeated it | a *regret*, which inverts the norm |
+| The choice was right — you just **wrote it down badly** | an *amendment*, which rewords it in place |
 
 The first matters more than it looks. Diverge without recording why, and the graph reports
 `DIVERGENCE` in that project forever: a warning that is correct, unanswerable and permanent,
@@ -237,6 +238,11 @@ REGRET: you chose this in 8 project(s) and later concluded it was a mistake —
 Nothing is deleted. The eight keep their original rationales, because a reason that looked good
 eight separate times is what tells you the lesson was expensive and the trap convincing. They
 simply stop counting as a norm.
+
+The fourth looks like the smallest and is the one worth getting right. `check` prints the title
+first, so the title is the part quoted back as your own reasoning — and a decision titled more
+narrowly than it is gets read as not-applicable, re-litigated, and answered a second time. An
+amendment fixes the words without inventing a change of mind, and the id keeps resolving.
 
 ## How it finds comparable work
 
