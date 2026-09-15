@@ -1,10 +1,4 @@
-# 0008 — An amendment keeps the id, stale slug and all
-
-## Status
-
-Accepted, 2026-09-15.
-
-## Context
+# An amendment keeps the decision id
 
 A decision id embeds a slug of the title it was minted from:
 
@@ -16,11 +10,18 @@ notify4j-core-for-multi-channel-booking-notifica-1789206712
 `amend` rewords a decision without superseding it (issue #10). The moment a
 title can change, the slug inside the id is a description of a title that no
 longer exists, and something has to be decided about it: leave it, or mint a
-new id and point the old one at it.
+new id and point the old one at it. The id does not change. The slug inside
+it is allowed to rot.
 
-## Decision
+## Considered options
 
-The id does not change. The slug inside it is allowed to rot.
+- **Regenerate the id, keep the old one as an alias** — rejected. It costs an
+  alias lookup on every `MATCH (d:Decision {id:$x})` in the file, a second
+  journal op shape, and a mapping that can itself go stale — all to keep a
+  cosmetic substring honest in a string the user reads as opaque.
+- **Regenerate the id with no alias** — rejected outright. Every existing
+  reference would silently stop matching, and a silent no-op is this tool's
+  worst failure mode.
 
 ## Consequences
 
@@ -39,14 +40,6 @@ Everything already holding an id keeps resolving — a `SUPERSEDES` edge, a
 message, a GitHub issue. None of these are enumerable, which is the argument:
 an id that can change is an id that can be dangling somewhere nobody will
 check.
-
-The rejected alternative was to regenerate the id and keep the old one as an
-alias. It costs an alias lookup on every `MATCH (d:Decision {id:$x})` in the
-file, a second journal op shape, and a mapping that can itself go stale — all
-to keep a cosmetic substring honest in a string the user reads as opaque.
-Regenerating with no alias was rejected outright: every existing reference
-would silently stop matching, and a silent no-op is this tool's worst failure
-mode.
 
 The visible cost is that `#notify4j-core-for-multi-channel-booking-notifica-…`
 can sit beside the title *"notify4j-core for all outbound third-party
