@@ -30,7 +30,7 @@ kept with its rationale intact and stops counting as current.
 _Avoid_: update, overwrite, revision
 
 **Amendment**:
-A correction to how a Decision was *described*, leaving what was decided
+A restatement of how a Decision was *described*, leaving what was decided
 untouched. Distinct from Supersession, which records that the decision itself
 changed: an amendment asserts no history, because none happened. The id
 survives it.
