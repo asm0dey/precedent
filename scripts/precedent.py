@@ -827,6 +827,18 @@ def cmd_amend(a, s: Store) -> None:
         print(f"  {k}")
         print(f"    was: {was[k] or '-'}")
         print(f"    now: {new}")
+    # cmd_record sets statement to `a.statement or a.title`, so a decision
+    # recorded without an explicit --statement carries the title verbatim in
+    # both fields. When --title alone is amended, that old statement survives
+    # untouched — and references/schema.md documents statement as a queryable
+    # Decision property, so a `cypher` escape hatch would resurface exactly
+    # the wording the amendment was meant to retire. Fixing this by silently
+    # also rewriting statement would be worse: it changes a field the user
+    # never named, which is the kind of magic this tool exists to not do. A
+    # note is the whole fix.
+    if "title" in fields and "statement" not in fields and was["statement"] == was["title"]:
+        print(f'  note: statement still reads "{was["statement"]}" — it was a copy of the old')
+        print("        title. Pass --statement to reword it too.")
 
 
 def cmd_regret(a, s: Store) -> None:
