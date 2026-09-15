@@ -51,6 +51,11 @@ POINTER = "location"
 # and SKILL.md both fetch it via `standing-orders` rather than holding their
 # own text, so there is nothing else to keep in sync when this changes.
 STANDING_ORDERS = """Standing orders for the rest of this session:
+- Re-prime when you change project. The brief above covers the directory this
+  session started in. After a `cd` into another project — or into a subproject of
+  this one — run `precedent-prime` (plain: `uv run {cli} brief --project <dir>`)
+  before your first substantive answer there. A brief from the wrong directory is
+  worse than none, because it reads as this project's history.
 - Before recommending a technology, framework, provider, or process choice, run
   `uv run {cli} check --topic <topic> --chose <option>` and lead with what it returns.
   Your opinion is worth less than what the user already chose and lived with.
@@ -63,6 +68,13 @@ STANDING_ORDERS = """Standing orders for the rest of this session:
   that chose it, so the graph stops arguing for it), NOT another `record`.
   "I usually do X, but here..." -> `record --despite`. Draft it, show one line,
   run it once they confirm.
+- When a precedent here contradicts a ruling in another project, do not just note
+  it — `check` reports that as DIVERGENCE, and leaving both live is the graph
+  arguing with itself. Name both rulings and drive it to one of three ends: the
+  pattern was wrong everywhere (`regret`), one side is simply out of date
+  (`record --supersedes <id>`, in whichever project moved on), or the divergence
+  is deliberate and gets written down as one (`record --despite`). The user picks;
+  you make the fork visible and draft the command.
 - Precedent is information, not a veto. Say when consistency is wrong here."""
 SCHEMA = 1          # journal line format; bump only on a breaking change
 
@@ -3035,6 +3047,8 @@ def _check_standing_orders() -> None:
         "check": "lead with what it returns",
         "record": "offer to record it",
         "regret": "stops arguing for it",
+        "prime": "Re-prime when you change project",
+        "diverge": "arguing with itself",
     }
     for verb, phrase in distinguishing_phrases.items():
         assert phrase in text, f"the banner must keep the bullet that covers `{verb}`"
