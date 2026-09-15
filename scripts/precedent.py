@@ -40,6 +40,12 @@ from datetime import date
 DEFAULT_HOME = pathlib.Path.home() / ".local/share/precedent"
 HOME = pathlib.Path(os.environ.get("PRECEDENT_HOME", DEFAULT_HOME))
 SCOPES = ("architecture", "business", "process", "tooling", "product")
+# The fields an amendment may rewrite: how the decision was DESCRIBED.
+# Everything else on a Decision — its topics, its options, its scope, the
+# project it belongs to — is WHAT WAS DECIDED, and changing one of those is a
+# different decision, which is `record --supersedes`. Also the whitelist that
+# makes apply_amend's f-string SET clause safe.
+AMENDABLE = ("title", "statement", "rationale")
 POINTER = "location"
 # The STANDING_ORDERS banner is this script's one copy; the session-start hook
 # and SKILL.md both fetch it via `standing-orders` rather than holding their
@@ -818,6 +824,33 @@ def apply_regret(s: Store, e: dict) -> None:
                MERGE (l)-[:REGRETS]->(d)""", {"lid": e["id"], "did": did})
 
 
+def apply_amend(s: Store, e: dict) -> None:
+    """Fold an amendment onto the decision it rewords.
+
+    MATCH, never MERGE. An amendment describes a decision that already
+    exists; a MERGE would fabricate a bare node carrying nothing but a new
+    title whenever the `record` line above it was unreadable — inventing
+    precedent out of a rewording, which `check` would then quote with no
+    rationale and no options beside it. `project_portable` refuses to create
+    a node for the same reason. Journal order guarantees the `record` line
+    is replayed first, so a miss here means that line was skipped, and
+    `replay_journal` has already reported it.
+
+    Only the keys present are written: an absent key means "unchanged", so
+    `amend --title` cannot silently blank a rationale that took a year to
+    earn. An amendment with no fields is a no-op rather than an empty SET
+    clause, which does not parse.
+
+    The SET clause is interpolated, its values are not: field names come
+    from AMENDABLE and nowhere else, every value goes through a parameter.
+    """
+    fields = {k: e[k] for k in AMENDABLE if k in e}
+    if not fields:
+        return
+    clause = ", ".join(f"d.{k}=${k}" for k in fields)
+    s.q(f"MATCH (d:Decision {{id:$id}}) SET {clause}", {"id": e["id"], **fields})
+
+
 def cmd_principle(a, s: Store) -> None:
     p = {"id": a.id, "statement": a.statement, "derived_from": csv(a.derived_from),
          "topics": [t.lower() for t in csv(a.topic)]}
@@ -1560,6 +1593,8 @@ def replay_entry(s: Store, e: dict) -> None:
             {"id": e["project_id"], "pp": e["portable"]})
     elif e["op"] == "regret":
         apply_regret(s, e)
+    elif e["op"] == "amend":
+        apply_amend(s, e)
     elif e["op"] == "principle":
         s.q("""MERGE (pr:Principle {id:$id})
                SET pr.statement=$statement, pr.created=$ts""", e)
@@ -2310,6 +2345,66 @@ def _check_journal(s: Store) -> None:
     s.q("MATCH (n) WHERE n.id STARTS WITH 'selftest-noversion' DETACH DELETE n")
 
 
+def _check_amend(s: Store) -> None:
+    """An amendment must rewrite the words and nothing else.
+
+    `check` prints the title first, so a misleading title is the expensive
+    error — it is the part that gets quoted back as precedent. What makes
+    amending safe to reach for instead of superseding is that it cannot
+    touch what was decided: an amendment able to move a CHOSE edge would be
+    a silent rewrite of history in the one tool whose value is that history
+    is not rewritten.
+    """
+    d = {"id": "selftest-amend", "title": "narrow title", "statement": "s",
+         "rationale": "r", "scope": "architecture", "created": today(),
+         "project_id": "selftest-amend-proj", "project_name": "selftest",
+         "tags": [], "topics": ["selftest-amend-topic"],
+         "chose": ["selftest-amend-opt"], "rejected": [], "supersedes": []}
+    try:
+        write_decision(s, d)
+        apply_amend(s, {"id": "selftest-amend", "title": "wider title"})
+        assert s.q("""MATCH (d:Decision {id:'selftest-amend'})
+                      RETURN d.title AS t, d.statement AS st,
+                             d.rationale AS r""") \
+            == [{"t": "wider title", "st": "s", "r": "r"}], \
+            "an absent field means unchanged, never cleared"
+        assert s.q("""MATCH (:Decision {id:'selftest-amend'})-[:CHOSE]->(o:Option)
+                      RETURN o.name AS n""") == [{"n": "selftest-amend-opt"}], \
+            "an amendment must not touch what was decided"
+        assert s.q("MATCH (d:Decision {id:'selftest-amend'}) RETURN d.status AS st") \
+            == [{"st": "active"}], "an amendment is not a supersession"
+
+        # Replayed from a journal line it must land identically: the graph is
+        # rebuilt from these lines and from nothing else, so an op that works
+        # only when called directly is an amendment that disappears on the
+        # next `rebuild` — and the old wording comes back.
+        replay_entry(s, {"op": "amend", "id": "selftest-amend",
+                         "rationale": "replayed reason", "v": SCHEMA})
+        assert s.q("""MATCH (d:Decision {id:'selftest-amend'})
+                      RETURN d.rationale AS r""") == [{"r": "replayed reason"}]
+
+        # An id that is not there must not be invented. A rewording is not a
+        # decision, and a bare node carrying only a title would be precedent
+        # nobody ever recorded — quoted back with full confidence.
+        replay_entry(s, {"op": "amend", "id": "selftest-amend-ghost",
+                         "title": "ghost", "v": SCHEMA})
+        assert s.q("MATCH (d:Decision {id:'selftest-amend-ghost'}) RETURN d.id AS id") \
+            == [], "amend must never create a Decision"
+
+        # An empty amendment is a no-op, not a query with an empty SET clause
+        # (which does not parse). cmd_amend refuses this case up front, but a
+        # journal line is not under its control.
+        apply_amend(s, {"id": "selftest-amend"})
+        assert s.q("""MATCH (d:Decision {id:'selftest-amend'})
+                      RETURN d.title AS t""") == [{"t": "wider title"}]
+    finally:
+        s.q("MATCH (n) WHERE n.id STARTS WITH 'selftest-amend' DETACH DELETE n")
+        for name in ("selftest-amend-topic", "selftest-amend-opt"):
+            s.q("""MATCH (n) WHERE (n:Topic OR n:Option) AND n.name = $name
+                     AND NOT EXISTS { MATCH (n)<--() } DETACH DELETE n""",
+                {"name": name})
+
+
 def _check_verdicts(s: Store) -> None:
     """`clear` must mean 'I searched and your history is silent', never
     'you typed a word I have never seen'. Reproduced before the fix:
@@ -2881,6 +2976,7 @@ def cmd_selftest(a, s: Store) -> None:
     _check_export(s)
     _check_concurrent_writers()
     _check_journal(s)
+    _check_amend(s)
     _check_lock_modes()
     _check_reader_isolation()
     _check_verdicts(s)
