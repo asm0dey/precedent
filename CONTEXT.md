@@ -75,13 +75,13 @@ per-project decision.
 
 **Project**:
 One tagged unit of work. Not necessarily one repository — a monorepo module is
-its own Project.
+its own Project. A linked git worktree is the same Project as its main checkout.
 
 **Portable id**:
-The identity that survives a machine, a clone location, and an operating system:
-the git remote, plus a subpath for a module inside it. Absent for a repo with no
-remote, which is a fine answer — a *wrong* portable id silently merges unrelated
-histories.
+The graph key of a Project with a git remote: the remote reduced to
+`host/owner/repo`, plus `#/<subpath>` for a module inside it. `origin` wins;
+otherwise the only remote there is; several and no `origin` means none.
+A Project without one is keyed by its main checkout's path. See `docs/adr/0009`.
 
 **Native path**:
 Where a Project lives on one machine. A display and liveness fact, never the

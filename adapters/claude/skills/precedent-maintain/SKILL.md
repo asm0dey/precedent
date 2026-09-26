@@ -19,9 +19,10 @@ rather than editing history. Suspected duplicate tags are repaired with
 
 Projects with no portable identity are reported too. A `split across two nodes`
 line means one repo has two Project nodes holding two separate decision
-histories — surface it, run the `cypher` command it prints to show both sides,
-and let the user decide. Never merge them yourself: precedent has no merge
-command precisely because merging two histories is a judgment.
+histories — surface it. `maintain` prints a `merge-project --from <id> --into <id>`
+line for each. Show the user both sides' decisions and let them decide; run it
+only on a yes. The same line appears under "projects whose path no longer
+exists" when a live project shares the ghost's name.
 
 Run `maintain --apply` only to delete orphan nodes; everything else is a
 proposal that needs the user's judgment.
