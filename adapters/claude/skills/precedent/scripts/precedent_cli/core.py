@@ -160,8 +160,9 @@ class Store:
                 raise
             raise SystemExit(
                 "error: the graph engine, graphdblite, is not installed for this Python.\n"
-                f"  with uv:    uv run {CLI} ...   (fetches it for you)\n"
-                "  without uv: python -m pip install graphdblite   (in a venv; README, 'Without uv')"
+                f"  with uv:    uv run {CLI} ...     (fetches it for you)\n"
+                f"  with pipx:  pipx run {CLI} ...   (fetches it for you)\n"
+                "  otherwise:  python -m pip install graphdblite   (in a venv; README, 'Without uv')"
             ) from None
 
         self._migrate_grafeo_store()

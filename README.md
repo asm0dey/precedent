@@ -101,13 +101,17 @@ The CLI is plain Python 3.12+ with one dependency, `graphdblite`. `<cli>` below 
 brief prints. Run it as a file, from any directory; do not copy `precedent.py` away from the
 `precedent_cli/` directory next to it.
 
-**pipx** (1.4 or later) reads the same inline metadata uv does:
+**pipx** (1.4 or later) is the closest to uv. It reads the same inline metadata, installs
+`graphdblite` into a cached environment on first run and reuses it afterwards, so there is no
+manual install:
 
 ```bash
+python3 -m pip install --user pipx   # or: brew install pipx / apt install pipx / scoop install pipx
 pipx run <cli> brief --project .
 ```
 
-**A virtualenv and pip:**
+**A virtualenv and pip**, if you'd rather not add pipx. Here you install the dependency yourself,
+once:
 
 ```bash
 python3 -m venv ~/.local/share/precedent/venv
