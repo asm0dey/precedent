@@ -9,7 +9,13 @@ from ..projects import attach_tags, contained, effective_tags, enclosing, neighb
 from ..reading import cmd_check, worth_backfilling
 from ..replay import replay_entry
 from .checks_identity import _git_repo
+from .checks_store import _expect_exit
 from ..writing import apply_amend, apply_regret, cmd_principle, write_decision
+
+DELETE_PROJECT = "MATCH (p:Project {id:$id}) DETACH DELETE p"
+DELETE_ORPHAN_TOPIC_OPTION = """MATCH (n) WHERE (n:Topic OR n:Option) AND n.name = $name
+                     AND NOT EXISTS { MATCH (n)<--() } DETACH DELETE n"""
+WIDER_TITLE = "wider title"
 
 
 def _check_missing_project(s: Store) -> None:
@@ -38,12 +44,10 @@ def _check_missing_project(s: Store) -> None:
                                     (named, f"A project named {named!r} exists"),
                                     ("nope-selftest", None)):
                     err = io.StringIO()
-                    try:
-                        with contextlib.redirect_stderr(err):
-                            project_info(s, value)
-                        raise AssertionError(f"--project {value!r} must be refused")
-                    except SystemExit as exc:
-                        assert exc.code == 2, (value, exc.code)
+                    with contextlib.redirect_stderr(err):
+                        exc = _expect_exit(project_info, s, value,
+                                           message=f"--project {value!r} must be refused")
+                    assert exc.code == 2, (value, exc.code)
                     assert "is not a directory" in err.getvalue(), err.getvalue()
                     if hint:
                         assert hint in err.getvalue(), err.getvalue()
@@ -135,7 +139,7 @@ def _check_projects(s: Store) -> None:
         # and the NEXT run then tripped the node-count invariant in
         # cmd_selftest — an error naming a check that was never at fault.
         for pid in (proj, other, root, mod, sibling, win, "github.com/asm0dey/selftest-c"):
-            s.q("MATCH (p:Project {id:$id}) DETACH DELETE p", {"id": pid})
+            s.q(DELETE_PROJECT, {"id": pid})
         for t in ("selftest-monorepo", "selftest-backend", "selftest-java"):
             s.q("""MATCH (n:Tag {name:$n}) WHERE NOT EXISTS { MATCH (n)<--() }
                      DETACH DELETE n""", {"n": t})
@@ -204,7 +208,7 @@ def _check_decisions(s: Store) -> None:
         finally:
             s.q("MATCH (l:Lesson {id:'selftest-lesson'}) DETACH DELETE l")
             s.q("MATCH (n) WHERE n.id STARTS WITH 'selftest' DETACH DELETE n")
-            s.q("MATCH (p:Project {id:$id}) DETACH DELETE p", {"id": str(tmp)})
+            s.q(DELETE_PROJECT, {"id": str(tmp)})
             for name in ("persistence", "postgres", "mongo", "sqlite",
                          "selftest-backend", "selftest-java"):
                 s.q("""MATCH (n) WHERE (n:Topic OR n:Option OR n:Tag) AND n.name = $name
@@ -228,11 +232,11 @@ def _check_amend(s: Store) -> None:
          "chose": ["selftest-amend-opt"], "rejected": [], "supersedes": []}
     try:
         write_decision(s, d)
-        apply_amend(s, {"id": "selftest-amend", "title": "wider title"})
+        apply_amend(s, {"id": "selftest-amend", "title": WIDER_TITLE})
         assert s.q("""MATCH (d:Decision {id:'selftest-amend'})
                       RETURN d.title AS t, d.statement AS st,
                              d.rationale AS r""") \
-            == [{"t": "wider title", "st": "s", "r": "r"}], \
+            == [{"t": WIDER_TITLE, "st": "s", "r": "r"}], \
             "an absent field means unchanged, never cleared"
         assert s.q("""MATCH (:Decision {id:'selftest-amend'})-[:CHOSE]->(o:Option)
                       RETURN o.name AS n""") == [{"n": "selftest-amend-opt"}], \
@@ -262,12 +266,11 @@ def _check_amend(s: Store) -> None:
         # journal line is not under its control.
         apply_amend(s, {"id": "selftest-amend"})
         assert s.q("""MATCH (d:Decision {id:'selftest-amend'})
-                      RETURN d.title AS t""") == [{"t": "wider title"}]
+                      RETURN d.title AS t""") == [{"t": WIDER_TITLE}]
     finally:
         s.q("MATCH (n) WHERE n.id STARTS WITH 'selftest-amend' DETACH DELETE n")
         for name in ("selftest-amend-topic", "selftest-amend-opt"):
-            s.q("""MATCH (n) WHERE (n:Topic OR n:Option) AND n.name = $name
-                     AND NOT EXISTS { MATCH (n)<--() } DETACH DELETE n""",
+            s.q(DELETE_ORPHAN_TOPIC_OPTION,
                 {"name": name})
 
 
@@ -376,7 +379,7 @@ def _check_verdicts(s: Store) -> None:
         s.q("MATCH (n) WHERE n.id STARTS WITH 'selftest-v' DETACH DELETE n")
         for pid in ("/nonexistent/precedent-selftest-v2", "/nonexistent/precedent-selftest-v3",
                     "/nonexistent/precedent-selftest-v4", "/nonexistent/precedent-selftest-v5", here):
-            s.q("MATCH (p:Project {id:$id}) DETACH DELETE p", {"id": pid})
+            s.q(DELETE_PROJECT, {"id": pid})
         for name in ("selftest-persistence", "selftest-v-other-topic",
                       "mongo", "postgres", "sqlite", "mysql", "cassandra",
                       "selftest-v-tag"):
@@ -455,10 +458,9 @@ def _check_verdicts(s: Store) -> None:
     finally:
         s.q("MATCH (pr:Principle {id:'selftest-p'}) DETACH DELETE pr")
         s.q("MATCH (n) WHERE n.id STARTS WITH 'selftest-p' DETACH DELETE n")
-        s.q("MATCH (p:Project {id:$id}) DETACH DELETE p", {"id": here})
+        s.q(DELETE_PROJECT, {"id": here})
         for name in ("selftest-auth", "selftest-p-other", "oidc"):
-            s.q("""MATCH (n) WHERE (n:Topic OR n:Option) AND n.name = $name
-                     AND NOT EXISTS { MATCH (n)<--() } DETACH DELETE n""", {"name": name})
+            s.q(DELETE_ORPHAN_TOPIC_OPTION, {"name": name})
 
     # cmd_principle and replay_entry both mutate the graph the same way the
     # existing tests above never touch: through s.log, which appends a real
@@ -556,8 +558,7 @@ def _check_maintain(s: Store) -> None:
         s.q("MATCH (n) WHERE n.id STARTS WITH 'selftest-m' DETACH DELETE n")
         s.q("MATCH (p:Project {id:'/nonexistent/precedent-selftest-m'}) DETACH DELETE p")
         for name in ("selftest-caching", "redis", "memcached", "hazelcast"):
-            s.q("""MATCH (n) WHERE (n:Topic OR n:Option) AND n.name = $name
-                     AND NOT EXISTS { MATCH (n)<--() } DETACH DELETE n""", {"name": name})
+            s.q(DELETE_ORPHAN_TOPIC_OPTION, {"name": name})
 
 
 def _check_maintain_hints() -> None:

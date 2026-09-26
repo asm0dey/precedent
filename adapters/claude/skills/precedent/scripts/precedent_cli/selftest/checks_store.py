@@ -9,8 +9,26 @@ import time
 
 from ..admin import cmd_standing_orders, export_to, relocate
 from ..cli import build_parser, wants_write
-from ..core import CLI, AMENDABLE, GRAPH_FORMAT, JournalTooNew, POINTER, SCHEMA, Store, csv, slug, today
+from ..core import CLI, AMENDABLE, GRAPH, GRAPH_FORMAT, JOURNAL, JournalTooNew, POINTER, SCHEMA, Store, csv, slug, today
 from ..replay import replay_entry, replay_journal
+
+LOCK_FILE = ".lock"   # a pre-engine-swap store's lock file; relocate leaves it behind
+COUNT_NODES = "MATCH (n) RETURN count(n) AS n"
+CREATE_GF_PROJECT = "CREATE (:Project {id:$id, name:'gf', portable:$pp, paths:$id})"
+PROJECT_BY_ID = "MATCH (p:Project {id:$id}) RETURN p.id AS id"
+
+
+def _expect_exit(fn, *args, message: str | None = None, **kwargs) -> SystemExit:
+    """Run fn and return the SystemExit it must raise; fail if it returns.
+
+    `message` is the failure to report when fn returns instead, so each check
+    keeps saying what it was guarding.
+    """
+    try:
+        fn(*args, **kwargs)
+    except SystemExit as exc:
+        return exc
+    raise AssertionError(message or f"{getattr(fn, '__name__', fn)} was expected to exit")
 
 
 def _check_helpers() -> None:
@@ -50,25 +68,22 @@ def _check_relocate() -> None:
             "fresh default must get a pointer"
 
         _sh.rmtree(base); dflt.mkdir(parents=True)
-        (dflt / "journal.jsonl").write_text("x\n"); (dflt / ".lock").write_text("")
+        (dflt / JOURNAL).write_text("x\n"); (dflt / LOCK_FILE).write_text("")
         relocate(tgt, dflt)
-        assert (tgt / "journal.jsonl").read_text() == "x\n", \
+        assert (tgt / JOURNAL).read_text() == "x\n", \
             "an existing store must move, not vanish"
         # The .lock prefix filter exists so the lock stays with the path
         # processes still queue on. A moved lock file is how relocation
         # strands a store, so assert it stayed rather than only exercising it.
-        assert not (tgt / ".lock").exists(), \
+        assert not (tgt / LOCK_FILE).exists(), \
             "the lock file must not travel with the payload"
-        assert (dflt / ".lock").exists(), "the lock file must stay at the old path"
+        assert (dflt / LOCK_FILE).exists(), "the lock file must stay at the old path"
 
         _sh.rmtree(base); dflt.mkdir(parents=True); tgt.mkdir(parents=True)
-        (dflt / "journal.jsonl").write_text("a\n"); (tgt / "journal.jsonl").write_text("b\n")
-        try:
-            relocate(tgt, dflt)
-            raise AssertionError("two populated stores must not be merged silently")
-        except SystemExit:
-            pass
-        assert (dflt / "journal.jsonl").read_text() == "a\n"
+        (dflt / JOURNAL).write_text("a\n"); (tgt / JOURNAL).write_text("b\n")
+        _expect_exit(relocate, tgt, dflt,
+                     message="two populated stores must not be merged silently")
+        assert (dflt / JOURNAL).read_text() == "a\n"
         _sh.rmtree(base)
 
 
@@ -80,14 +95,14 @@ def _check_export(s: Store) -> None:
     with tempfile.TemporaryDirectory() as td:
         exp = pathlib.Path(td) / "export"
         export_to(s, exp)
-        assert (exp / "graph.db").stat().st_size > 0, "export wrote no graph"
+        assert (exp / GRAPH).stat().st_size > 0, "export wrote no graph"
         # Only when there is one to copy: a store that has recorded nothing
         # has no journal, and an export of it is legitimately graph-only.
-        assert (exp / "journal.jsonl").exists() == s.journal.exists(), (
+        assert (exp / JOURNAL).exists() == s.journal.exists(), (
             "export wrote a graph with no journal — the copy cannot be rebuilt")
         with Store(exp, write=False) as copy:
-            n = copy.q("MATCH (n) RETURN count(n) AS n")[0]["n"]
-        live = s.q("MATCH (n) RETURN count(n) AS n")[0]["n"]
+            n = copy.q(COUNT_NODES)[0]["n"]
+        live = s.q(COUNT_NODES)[0]["n"]
         assert n == live, f"export holds {n} nodes, the store has {live}"
 
 
@@ -460,7 +475,7 @@ def _check_graph_format() -> None:
                              "project_id": old, "project_name": "gf", "project_path": old,
                              "portable": pp, "tags": [], "topics": [], "chose": [],
                              "rejected": [], "supersedes": []})
-            s.q("CREATE (:Project {id:$id, name:'gf', portable:$pp, paths:$id})",
+            s.q(CREATE_GF_PROJECT,
                 {"id": old, "pp": pp})
             s.q("CREATE (:Decision {id:'selftest-gf1', status:'active'})")
             s.q("""MATCH (d:Decision {id:'selftest-gf1'}), (p:Project {id:$id})
@@ -473,7 +488,7 @@ def _check_graph_format() -> None:
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             with Store(home, write=True) as s:
-                assert s.q("MATCH (p:Project {id:$id}) RETURN p.id AS id", {"id": old}) == []
+                assert s.q(PROJECT_BY_ID, {"id": old}) == []
                 assert s.q("""MATCH (:Decision {id:'selftest-gf1'})-[:IN_PROJECT]->(p:Project)
                               RETURN p.id AS id""") == [{"id": pp}]
                 assert meta(s) == [{"f": GRAPH_FORMAT}]
@@ -491,13 +506,13 @@ def _check_graph_format() -> None:
                                  "project_id": old, "project_name": "gf", "project_path": old,
                                  "portable": pp, "tags": [], "topics": [], "chose": [],
                                  "rejected": [], "supersedes": []})
-                s.q("CREATE (:Project {id:$id, name:'gf', portable:$pp, paths:$id})",
+                s.q(CREATE_GF_PROJECT,
                     {"id": old, "pp": pp})
                 s.q("MATCH (m:Meta) SET m.graph_format=null, m.claim='other', m.claimed=$c",
                     {"c": time.time()})
 
             with Store(home2, write=True) as s:
-                assert s.q("MATCH (p:Project {id:$id}) RETURN p.id AS id", {"id": old}) \
+                assert s.q(PROJECT_BY_ID, {"id": old}) \
                     == [{"id": old}], "a fresh claim held elsewhere must block replay"
                 row = s.q("MATCH (m:Meta) RETURN m.graph_format AS f")[0]["f"]
                 assert (row or 0) < GRAPH_FORMAT, "an unclaimed replay must leave the format unmarked"
@@ -512,14 +527,14 @@ def _check_graph_format() -> None:
                                  "project_id": old, "project_name": "gf", "project_path": old,
                                  "portable": pp, "tags": [], "topics": [], "chose": [],
                                  "rejected": [], "supersedes": []})
-                s.q("CREATE (:Project {id:$id, name:'gf', portable:$pp, paths:$id})",
+                s.q(CREATE_GF_PROJECT,
                     {"id": old, "pp": pp})
                 s.q("MATCH (m:Meta) SET m.graph_format=null, m.claim='other', m.claimed=$c",
                     {"c": time.time() - 10_000})
 
             with contextlib.redirect_stderr(io.StringIO()):
                 with Store(home3, write=True) as s:
-                    assert s.q("MATCH (p:Project {id:$id}) RETURN p.id AS id", {"id": old}) \
+                    assert s.q(PROJECT_BY_ID, {"id": old}) \
                         == [], "a stale claim must not block replay"
                     assert s.q("MATCH (p:Project {portable:$pp}) RETURN p.id AS id", {"pp": pp}) \
                         == [{"id": pp}]
@@ -536,13 +551,10 @@ def _check_graph_format() -> None:
             with open(s.journal, "a", encoding="utf-8") as f:
                 f.write(json.dumps({"op": "record", "id": "selftest-gf-future",
                                     "v": SCHEMA + 1}) + "\n")
-            n = s.q("MATCH (n) RETURN count(n) AS n")[0]["n"]
-            try:
-                replay_journal(s)
-                raise AssertionError("a too-new journal must be refused")
-            except SystemExit as exc:
-                assert "upgrade" in str(exc), exc
-            assert s.q("MATCH (n) RETURN count(n) AS n")[0]["n"] == n, \
+            n = s.q(COUNT_NODES)[0]["n"]
+            exc = _expect_exit(replay_journal, s, message="a too-new journal must be refused")
+            assert "upgrade" in str(exc), exc
+            assert s.q(COUNT_NODES)[0]["n"] == n, \
                 "a refused replay must not have wiped the graph"
 
 

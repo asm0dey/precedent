@@ -52,6 +52,8 @@ STANDING_ORDERS = """Standing orders for the rest of this session:
 - Precedent is information, not a veto. Say when consistency is wrong here."""
 SCHEMA = 1          # journal line format; bump only on a breaking change
 GRAPH_FORMAT = 2    # graph layout; 2 = projects keyed by git remote (docs/adr/0009)
+JOURNAL = "journal.jsonl"   # the source of truth, one JSON object per line
+GRAPH = "graph.db"          # rebuilt from JOURNAL; see cmd_rebuild
 
 
 class JournalTooNew(Exception):
@@ -132,8 +134,8 @@ class Store:
         home.mkdir(parents=True, exist_ok=True)
         self.home = home = resolve_home(home)
         home.mkdir(parents=True, exist_ok=True)
-        self.db_path = home / "graph.db"
-        self.journal = home / "journal.jsonl"
+        self.db_path = home / GRAPH
+        self.journal = home / JOURNAL
         # `write` no longer picks a lock mode — there is no lock. It still
         # says whether this command may change the store, and two things read
         # it: the grafeo-era migration below (only a writer may rebuild) and

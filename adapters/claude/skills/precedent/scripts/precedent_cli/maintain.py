@@ -8,6 +8,8 @@ import sys
 from .core import Store, csv
 from .projects import attach_tags, fold_project, merge_target, normalised, paths_of, portable_id, project_info, settle, tags_of, upsert_project, vocabulary
 
+NONE_LINE = "  none"
+
 
 # -------------------------------------------------------------------- maintenance
 
@@ -309,7 +311,7 @@ def cmd_maintain(a, s: Store) -> None:
     dupes = [sorted(v) for v in groups.values() if len(v) > 1]
     print(f"\n== tags that differ only in spelling ({len(dupes)}) ==")
     if not dupes:
-        print("  none")
+        print(NONE_LINE)
     for names in sorted(dupes):
         print(f"  {' / '.join(repr(n) for n in names)}"
               f" — merge with: precedent.py tag --merge {names[1]} --into {names[0]}")
@@ -322,7 +324,7 @@ def cmd_maintain(a, s: Store) -> None:
     leftovers = superseded_engine_leftovers(s)
     print(f"\n== leftovers from the previous graph engine ({len(leftovers)}) ==")
     if not leftovers:
-        print("  none")
+        print(NONE_LINE)
     else:
         print("  the journal is the source of truth and the graph was rebuilt from it,")
         print("  so these are readable by nothing that is still installed:")
@@ -391,7 +393,7 @@ def cmd_maintain(a, s: Store) -> None:
     moved = remote_changes(s)
     print(f"\n== one checkout, two remotes: a remote changed ({len(moved)}) ==")
     if not moved:
-        print("  none")
+        print(NONE_LINE)
     for m in moved:
         a_, b_ = m["nodes"]
         print(f"  {a_['name']} ({a_['id']}) and {b_['name']} ({b_['id']})"

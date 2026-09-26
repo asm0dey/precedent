@@ -7,6 +7,8 @@ import sys
 
 from .core import Store, csv, today
 
+SET_PATHS = "MATCH (p:Project {id:$id}) SET p.paths=$paths"
+
 
 # ----------------------------------------------------------------- project tags
 
@@ -288,7 +290,7 @@ def settle(s: Store, info: dict) -> None:
     paths = paths_of(row)
     if info["path"] not in paths:
         paths = sorted(paths + [info["path"]])
-        s.q("MATCH (p:Project {id:$id}) SET p.paths=$paths",
+        s.q(SET_PATHS,
             {"id": info["key"], "paths": "\n".join(paths)})
     info["id"], info["legacy"] = info["key"], []
     info["name"], info["paths"] = row["name"] or info["name"], paths
@@ -509,7 +511,7 @@ def fold_project(s: Store, frm: str, into: str) -> int:
         {"id": into, "name": src["name"], "seen": src["seen"] or today()})
     dst = s.q("MATCH (p:Project {id:$id}) RETURN p.paths AS paths", {"id": into})[0]
     paths = sorted(set(paths_of(dst)) | set(paths_of(src)))
-    s.q("MATCH (p:Project {id:$id}) SET p.paths=$paths",
+    s.q(SET_PATHS,
         {"id": into, "paths": "\n".join(paths)})
     moved = s.q("""MATCH (d:Decision)-[:IN_PROJECT]->(:Project {id:$f})
                    RETURN count(d) AS n""", {"f": frm})[0]["n"]
@@ -551,7 +553,7 @@ def upsert_project(s: Store, info: dict) -> dict:
     known = paths_of(row)
     if local not in known:
         known = sorted(known + [local])
-        s.q("MATCH (p:Project {id:$id}) SET p.paths=$paths",
+        s.q(SET_PATHS,
             {"id": key, "paths": "\n".join(known)})
     info["id"], info["paths"] = key, known
     return info

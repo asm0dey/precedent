@@ -11,6 +11,12 @@ from ..projects import attach_tags, detect_project, fold_project, identity_path,
 from ..reading import cmd_brief
 from ..replay import replay_entry, replay_journal
 from ..writing import cmd_record, write_decision
+from .checks_store import _expect_exit
+
+PRECEDENT_REMOTE = "github.com/asm0dey/precedent"
+PROJECT_PATHS = "MATCH (p:Project {id:$id}) RETURN p.paths AS paths"
+COUNT_PROJECTS = "MATCH (p:Project) RETURN count(p) AS n"
+PROJECT_BY_ID = "MATCH (p:Project {id:$id}) RETURN p.id AS id"
 
 
 def _check_detect_project() -> None:
@@ -110,12 +116,12 @@ def _check_identity(s: Store) -> None:
     at the same relative path on two machines. The remote is the identity.
     """
     for raw, want in [
-        ("https://github.com/asm0dey/precedent.git", "github.com/asm0dey/precedent"),
-        ("git@github.com:asm0dey/precedent.git", "github.com/asm0dey/precedent"),
-        ("ssh://git@github.com/asm0dey/precedent.git", "github.com/asm0dey/precedent"),
+        ("https://github.com/asm0dey/precedent.git", PRECEDENT_REMOTE),
+        ("git@github.com:asm0dey/precedent.git", PRECEDENT_REMOTE),
+        ("ssh://git@github.com/asm0dey/precedent.git", PRECEDENT_REMOTE),
         ("https://user:token@github.com/o/r.git", "github.com/o/r"),
         ("ssh://git@host:2222/o/r.git", "host/o/r"),
-        ("https://GitHub.com/Asm0dey/Precedent", "github.com/asm0dey/precedent"),
+        ("https://GitHub.com/Asm0dey/Precedent", PRECEDENT_REMOTE),
         ("", None),
         # A numeric first path segment must not be mistaken for a port: scp-style
         # syntax has no port, only a scheme URL can carry one (Ruling 24).
@@ -145,7 +151,7 @@ def _check_identity(s: Store) -> None:
         run("init", "-q")
         assert portable_id(root) is None, "a repo with no origin has no portable id"
         run("remote", "add", "origin", "git@github.com:asm0dey/precedent.git")
-        assert portable_id(root) == "github.com/asm0dey/precedent"
+        assert portable_id(root) == PRECEDENT_REMOTE
         assert portable_id(root / "mod") == "github.com/asm0dey/precedent#/mod"
 
     # Two machines, one repo: the second must resolve onto the first node,
@@ -165,7 +171,7 @@ def _check_identity(s: Store) -> None:
         assert b_info["id"] == pp, "the second sighting must resolve onto the same node"
         assert s.q("MATCH (p:Project {portable:$pp}) RETURN count(p) AS n",
                    {"pp": pp}) == [{"n": 1}], "one repo, one node"
-        row = s.q("MATCH (p:Project {id:$id}) RETURN p.paths AS paths", {"id": pp})[0]
+        row = s.q(PROJECT_PATHS, {"id": pp})[0]
         assert set(paths_of(row)) == {linux, windows}, row
 
         # The other direction, and the one that cannot be undone: convergence
@@ -177,7 +183,7 @@ def _check_identity(s: Store) -> None:
         c_info = upsert_project(s, {"id": unrelated, "path": unrelated, "name": "i",
                                     "portable": pp2})
         assert c_info["id"] == pp2, "a different remote must key a different node"
-        assert set(paths_of(s.q("MATCH (p:Project {id:$id}) RETURN p.paths AS paths",
+        assert set(paths_of(s.q(PROJECT_PATHS,
                                 {"id": pp2})[0])) == {unrelated}, \
             "a distinct repo must not inherit the other one's paths"
         assert s.q("MATCH (p:Project {portable:$pp}) RETURN count(p) AS n",
@@ -378,9 +384,9 @@ def _check_settle() -> None:
             # 2. brief never creates a node from nothing.
             E = base / "empty-repo"
             _git_repo(E, "git@github.com:asm0dey/selftest-st-empty.git")
-            n = s.q("MATCH (p:Project) RETURN count(p) AS n")[0]["n"]
+            n = s.q(COUNT_PROJECTS)[0]["n"]
             settle(s, project_info(s, str(E)))
-            assert s.q("MATCH (p:Project) RETURN count(p) AS n")[0]["n"] == n
+            assert s.q(COUNT_PROJECTS)[0]["n"] == n
 
             # 3. A remote-less worktree that 0.4.x keyed on its own path.
             M, W = base / "main", base / "wt"
@@ -396,7 +402,7 @@ def _check_settle() -> None:
             assert info["key"] == str(M) and info["legacy"] == [str(W)], info
             settle(s, info)
             assert in_project("selftest-st3") == [{"id": str(M)}]
-            m_paths = lambda: paths_of(s.q("MATCH (p:Project {id:$id}) RETURN p.paths AS paths",
+            m_paths = lambda: paths_of(s.q(PROJECT_PATHS,
                                            {"id": str(M)})[0])
             # Without the live path, removing the worktree leaves the main
             # checkout's own node reported as gone by `maintain`.
@@ -406,7 +412,7 @@ def _check_settle() -> None:
             assert in_project("selftest-st3") == [{"id": str(M)}], \
                 "rebuild must land the worktree's decisions on the main checkout"
             assert str(M) in m_paths(), f"rebuild must keep the live path: {m_paths()}"
-            assert s.q("MATCH (p:Project {id:$id}) RETURN p.id AS id", {"id": str(W)}) == []
+            assert s.q(PROJECT_BY_ID, {"id": str(W)}) == []
 
             # 4. The header names the project, not the worktree directory.
             s.q("MATCH (p:Project {id:$id}) SET p.name='main'", {"id": str(M)})
@@ -440,12 +446,10 @@ def _check_merge_project() -> None:
 
     def refused(s, frm, into) -> str:
         err = io.StringIO()
-        try:
-            with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
-                run(s, frm, into)
-            raise AssertionError(f"merge-project {frm!r} -> {into!r} must be refused")
-        except SystemExit as exc:
-            assert exc.code == 2, exc.code
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+            exc = _expect_exit(run, s, frm, into,
+                               message=f"merge-project {frm!r} -> {into!r} must be refused")
+        assert exc.code == 2, exc.code
         return err.getvalue()
 
     with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as tmp_home:
@@ -465,7 +469,7 @@ def _check_merge_project() -> None:
             out = io.StringIO()
             with contextlib.redirect_stdout(out):
                 run(s, ghost, str(real))
-            assert s.q("MATCH (p:Project {id:$id}) RETURN p.id AS id", {"id": ghost}) == []
+            assert s.q(PROJECT_BY_ID, {"id": ghost}) == []
             assert {r["d"] for r in s.q("""MATCH (d:Decision)-[:IN_PROJECT]->(:Project {id:$id})
                                             RETURN d.id AS d""", {"id": str(real)})} \
                 == {"selftest-mp1", "selftest-mp2"}
@@ -494,11 +498,11 @@ def _check_merge_project() -> None:
             with contextlib.redirect_stdout(out):
                 run(s, older, os.path.join(str(real), "."))
             assert "merged" in out.getvalue(), out.getvalue()
-            assert s.q("MATCH (p:Project {id:$id}) RETURN p.id AS id", {"id": older}) == []
+            assert s.q(PROJECT_BY_ID, {"id": older}) == []
 
-            n = s.q("MATCH (p:Project) RETURN count(p) AS n")[0]["n"]
+            n = s.q(COUNT_PROJECTS)[0]["n"]
             replay_entry(s, {"op": "project_merge", "from": "selftest-nope", "into": str(real)})
-            assert s.q("MATCH (p:Project) RETURN count(p) AS n")[0]["n"] == n, \
+            assert s.q(COUNT_PROJECTS)[0]["n"] == n, \
                 "replaying a merge whose source is gone is a no-op"
 
 
@@ -582,15 +586,15 @@ def _check_merged_into_portable() -> None:
                 record(notes, "selftest-mip1")
                 record(repo, "selftest-mip2")
                 cmd_merge_project(argparse.Namespace(frm=str(notes), into=str(repo)), s)
-                n = s.q("MATCH (p:Project) RETURN count(p) AS n")[0]["n"]
+                n = s.q(COUNT_PROJECTS)[0]["n"]
                 record(notes, "selftest-mip3")
-            assert s.q("MATCH (p:Project) RETURN count(p) AS n")[0]["n"] == n, \
+            assert s.q(COUNT_PROJECTS)[0]["n"] == n, \
                 "a merged remote-less path must not key a new node"
             assert s.q("""MATCH (:Decision {id:'selftest-mip3'})-[:IN_PROJECT]->(p:Project)
                           RETURN p.id AS id""") == [{"id": pp}]
             assert project_info(s, str(notes))["id"] == pp, "readers resolve it the same way"
             replay_journal(s)
-            assert s.q("MATCH (p:Project) RETURN count(p) AS n")[0]["n"] == n, "rebuild too"
+            assert s.q(COUNT_PROJECTS)[0]["n"] == n, "rebuild too"
 
 
 def _check_remote_changed() -> None:
@@ -620,7 +624,7 @@ def _check_remote_changed() -> None:
                 _git(repo, "remote", "set-url", "origin",
                      "git@github.com:asm0dey/selftest-rc-renamed.git")
                 record("selftest-rc2")
-            n = s.q("MATCH (p:Project) RETURN count(p) AS n")[0]["n"]
+            n = s.q(COUNT_PROJECTS)[0]["n"]
             assert n == 2, "the conservative rule splits; maintain reports, never folds"
             out = io.StringIO()
             with contextlib.redirect_stdout(out):
@@ -628,7 +632,7 @@ def _check_remote_changed() -> None:
             text = out.getvalue()
             assert f'merge-project --from "{old}" --into "{new}"' in text, text
             assert f'--from "{new}"' not in text, "the checkout's current remote is the target"
-            assert s.q("MATCH (p:Project) RETURN count(p) AS n")[0]["n"] == n
+            assert s.q(COUNT_PROJECTS)[0]["n"] == n
 
 
 def _check_merge_legacy_clash() -> None:
@@ -687,13 +691,13 @@ def _check_portable_replay() -> None:
         with Store(pathlib.Path(tmp_home), write=True) as s:
             upsert_project(s, {"id": pid, "path": pid, "name": "bp", "portable": None})
             replay_entry(s, entry)
-            assert s.q("MATCH (p:Project {id:$id}) RETURN p.id AS id", {"id": pid}) == []
+            assert s.q(PROJECT_BY_ID, {"id": pid}) == []
             assert s.q("MATCH (p:Project {id:$id}) RETURN p.portable AS pp, p.paths AS paths",
                        {"id": portable}) == [{"pp": portable, "paths": pid}]
 
             s.q("MATCH (p:Project) DETACH DELETE p")
             replay_entry(s, entry)
-            assert s.q("MATCH (p:Project) RETURN count(p) AS n") == [{"n": 0}], \
+            assert s.q(COUNT_PROJECTS) == [{"n": 0}], \
                 "replaying a project_portable line must not create a node"
 
             # Spec A4: the schema stamp is written after the payload, so a

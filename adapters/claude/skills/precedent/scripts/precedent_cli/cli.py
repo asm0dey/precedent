@@ -163,11 +163,10 @@ def wants_write(a) -> bool:
     return a.writes
 
 
-def main(argv=None) -> int:
+def main(argv=None) -> None:
     a = build_parser().parse_args(argv)
     if a.cmd in ("init", "standing-orders"):
         a.fn(a)
-        return 0
+        return
     with Store(pathlib.Path(a.home), write=wants_write(a)) as s:
         a.fn(a, s)
-    return 0
