@@ -26,7 +26,9 @@ def _expect_exit(fn, *args, message: str | None = None, **kwargs) -> SystemExit:
     """
     try:
         fn(*args, **kwargs)
-    except SystemExit as exc:
+    # Catching the exit is this helper's whole purpose: it is how the checks
+    # assert that a command refuses. The exception is returned, not lost.
+    except SystemExit as exc:  # NOSONAR python:S5754
         return exc
     raise AssertionError(message or f"{getattr(fn, '__name__', fn)} was expected to exit")
 
@@ -632,7 +634,7 @@ def _check_missing_engine() -> None:
 
     probe = ("import sys; sys.path.insert(0, sys.argv[1]); sys.modules['graphdblite'] = None\n"
              "from precedent_cli.cli import main\n"
-             "sys.exit(main(['--home', sys.argv[2], 'check', '--topic', 't']))\n")
+             "main(['--home', sys.argv[2], 'check', '--topic', 't'])\n")
     with tempfile.TemporaryDirectory() as tmp:
         r = subprocess.run([sys.executable, "-c", probe, str(CLI.parent), tmp],
                            capture_output=True, text=True, encoding="utf-8",

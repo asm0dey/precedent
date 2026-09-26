@@ -18,4 +18,4 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from precedent_cli.cli import main  # noqa: E402
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()  # errors leave through SystemExit; returning means exit 0
