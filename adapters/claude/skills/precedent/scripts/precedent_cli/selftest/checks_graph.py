@@ -36,7 +36,7 @@ def _check_missing_project(s: Store) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             here = pathlib.Path(tmp) / "calit"
             here.mkdir()
-            (here / "notes.txt").write_text("x")
+            (here / "notes.txt").write_text("x", encoding="utf-8")
             os.chdir(here)
             try:
                 for value, hint in (("calit", "did you mean --project . ?"),
