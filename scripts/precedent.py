@@ -1777,10 +1777,13 @@ def cmd_maintain(a, s: Store) -> None:
         print(f"  {r['name']}  ({r['id']})")
         # A ghost (#13) usually shares its name with the project it belongs to.
         # Offered, never run: which one it is remains a judgment.
+        # ponytail: plain quotes, no escaping — right in bash, zsh, PowerShell
+        # and cmd for any path; an id containing " would break it, and
+        # Windows forbids that character.
         for c in projects:
             if c["name"] == r["name"] and c["id"] not in gone and c["id"] != r["id"]:
-                print(f"    merge with: precedent.py merge-project --from {json.dumps(r['id'])}"
-                      f" --into {json.dumps(c['id'])}")
+                print(f'    merge with: precedent.py merge-project --from "{r["id"]}"'
+                      f' --into "{c["id"]}"')
     print(f"\n== projects recorded on another machine ({len(states['elsewhere'])}) ==")
     for r in states["elsewhere"]:
         print(f"  {r['name']}  ({r['id']})  — not gone, just not here")
@@ -1800,8 +1803,8 @@ def cmd_maintain(a, s: Store) -> None:
                   " the second, and this one is stranded.")
             print("     one repo, so this is almost certainly one project — but check"
                   " both sides' decisions first, then:")
-            print(f"       precedent.py merge-project --from {json.dumps(g['id'])}"
-                  f" --into {json.dumps(g['twin']['id'])}")
+            print(f'       precedent.py merge-project --from "{g["id"]}"'
+                  f' --into "{g["twin"]["id"]}"')
         elif g["portable"]:
             print(f"  {g['name']}  ({g['id']})  — {g['portable']} is unclaimed,"
                   " so the next write here stamps it")
@@ -3707,10 +3710,8 @@ def _check_maintain_hints() -> None:
             with contextlib.redirect_stdout(out):
                 cmd_maintain(argparse.Namespace(apply=False), s)
             text = out.getvalue()
-            assert (f"merge-project --from {json.dumps(ghost)}"
-                    f" --into {json.dumps(str(live))}") in text, text
-            assert (f"merge-project --from {json.dumps(str(split))}"
-                    f" --into {json.dumps(pp)}") in text, text
+            assert f'merge-project --from "{ghost}" --into "{live}"' in text, text
+            assert f'merge-project --from "{split}" --into "{pp}"' in text, text
             assert "cypher --params" not in text, "the hand-written query is replaced"
 
 
