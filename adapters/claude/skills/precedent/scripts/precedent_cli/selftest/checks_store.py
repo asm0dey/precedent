@@ -129,7 +129,8 @@ def _check_concurrent_writers() -> None:
 
     scripts_dir = str(CLI.parent)
     # A subprocess cannot `import precedent` — this file is a script, not an
-    # installed package — so it loads this exact module by path.
+    # installed package — so it puts the scripts directory on sys.path and
+    # imports precedent_cli.core from there instead.
     writer_src = (
         "import sys, json, pathlib\n"
         "sys.path.insert(0, sys.argv[1])\n"
@@ -254,7 +255,8 @@ def _check_reader_isolation() -> None:
     scripts_dir = str(CLI.parent)
 
     # A subprocess can't `import precedent` — this file is a script, not an
-    # installed package — so it loads this exact module by path instead.
+    # installed package — so it puts the scripts directory on sys.path and
+    # imports precedent_cli.core from there instead.
     # Both loops use real `Store`, so they open the graph exactly the way
     # every command does — same engine, same busy timeout, no lock.
     writer_src = (
@@ -580,10 +582,14 @@ def _check_standing_orders() -> None:
 def _check_entry_point() -> None:
     """The entry script imports its package from any cwd and through a symlink.
 
-    Python puts the *resolved* script directory on sys.path, which is the whole
-    reason the split needs no install step. Manual installs symlink the skill
-    or the script, and agents run it from the project directory, so both must
-    work. standing-orders needs no Store, so this costs no engine start.
+    The entry script puts its own resolved directory on sys.path, which is the
+    whole reason the split needs no install step and also why this works
+    through a symlink on every OS: CPython only resolves a symlinked script's
+    directory itself on POSIX, so a script that leaves sys.path to CPython
+    would import the wrong package (or fail to import at all) through a
+    symlink on Windows. Manual installs symlink the skill or the script, and
+    agents run it from the project directory, so both must work.
+    standing-orders needs no Store, so this costs no engine start.
     """
     import tempfile
 

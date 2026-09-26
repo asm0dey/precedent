@@ -155,7 +155,9 @@ class Store:
         # and not this file's to assert.
         try:
             import graphdblite
-        except ImportError:
+        except ModuleNotFoundError as e:
+            if e.name != "graphdblite":
+                raise
             raise SystemExit(
                 "error: the graph engine, graphdblite, is not installed for this Python.\n"
                 f"  with uv:    uv run {CLI} ...   (fetches it for you)\n"

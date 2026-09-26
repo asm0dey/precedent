@@ -108,9 +108,9 @@ def cmd_standing_orders(a) -> None:
     side effect of printing text, and this command is called from hooks that
     may run in directories the user never records anything in.
 
-    The path is resolved from __file__ rather than assumed, so a checkout
-    installed anywhere — ~/.claude/skills, an ACR cache, a bare clone —
-    prints a command line that actually runs.
+    Prints `core.CLI`, which is derived from the entry script's own location
+    rather than assumed, so a checkout installed anywhere — ~/.claude/skills,
+    an ACR cache, a bare clone — prints a command line that actually runs.
     """
     print(STANDING_ORDERS.format(cli=CLI))
 

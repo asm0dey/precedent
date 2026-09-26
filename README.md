@@ -115,7 +115,9 @@ python3 -m venv ~/.local/share/precedent/venv
 ~/.local/share/precedent/venv/bin/python <cli> brief --project .
 ```
 
-On Windows the interpreter is `...\venv\Scripts\python.exe`. Installing into the system Python
+On Windows, create the venv with `py -3.12 -m venv ...` (or `python -m venv ...`), since
+`python3` often doesn't exist there; the interpreter is then `...\venv\Scripts\python.exe`.
+Installing into the system Python
 (`pip install graphdblite` with no venv) also works where your distribution allows it; many
 refuse with `externally-managed-environment` (PEP 668), which is why the venv is the example.
 
