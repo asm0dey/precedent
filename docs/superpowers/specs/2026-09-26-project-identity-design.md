@@ -64,6 +64,22 @@ exposed. Vocabulary is defined in `CONTEXT.md`.
   and a minted id in `.git/config` (writes into the user's repo; does not
   cross machines).
 
+### Known limitation: path-keyed projects across machines
+
+A project keyed by path matches only at that same path. On a second machine
+with a different layout, a path-keyed **enclosing** project (e.g. a plain
+`my-decisions/` folder around several repos) no longer encloses the clone:
+its decisions drop out of "inherited from enclosing projects" and appear only
+as tag-ranked kin under "closest projects". Verified 2026-09-26 by cloning
+this repo elsewhere with a copied store: "decided here", tags and kin were
+identical; the inherited section was missing.
+
+Not addressed here — there is nothing portable to match on, and guessing
+(say, by directory name) is the silent merge ADR 0002 rules out. Workarounds:
+keep the same layout, or make the parent a git repo with a remote. A
+journaled `alias-path` command (add a local path to a node's `paths` without
+re-keying it) is the follow-up if this bites.
+
 ## 4. Folding and lazy re-key
 
 `fold_project(s, from_id, into_id)` — the single graph operation behind
