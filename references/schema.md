@@ -197,10 +197,11 @@ cannot blank a rationale. Nothing else on the decision is amendable: topics,
 options, scope and project are *what was decided*, and changing one of those
 is a different decision, recorded with `record --supersedes`.
 
-It replays as `MATCH ... SET` — never a `MERGE`, for the same reason
-`project_portable` does not: an amendment must not fabricate a decision out of
-a rewording when the `record` line above it was unreadable. Journal order puts
-that line first, so a miss means it was skipped and already reported.
+It replays as `MATCH ... SET` — never a `MERGE`: an amendment must not
+fabricate a decision out of a rewording when the `record` line above it was
+unreadable, just as a `project_portable` line never creates a project. Journal
+order puts that line first, so a miss means it was skipped and already
+reported.
 
 The id does not change, including the now-stale title slug inside it. See
 `docs/adr/0008`.

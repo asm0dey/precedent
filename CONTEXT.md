@@ -84,8 +84,9 @@ otherwise the only remote there is; several and no `origin` means none.
 A Project without one is keyed by its main checkout's path. See `docs/adr/0009`.
 
 **Native path**:
-Where a Project lives on one machine. A display and liveness fact, never the
-identity. Several may point at one Project.
+Where a Project lives on one machine. A display and liveness fact; the
+identity only for a Project with no remote, and then only its main checkout's
+path. Several may point at one Project.
 
 **Kin**:
 Another Project ranked comparable by how many tags it shares. Excludes anything
