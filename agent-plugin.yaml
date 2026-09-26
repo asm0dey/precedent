@@ -1,6 +1,6 @@
 schemaVersion: 1
 name: asm0dey/precedent
-version: 0.4.1
+version: 0.5.0
 description: >-
   Remember and reuse the user's architectural, business and tooling decisions
   across every project, in a queryable graph.
@@ -29,8 +29,6 @@ artifacts:
     - id: precedent-tag
       path: adapters/claude/skills/precedent-tag
   scripts:
-    - id: precedent-cli
-      path: scripts/precedent.py
     - id: statusline
       path: adapters/claude/hooks/statusline.sh
   hooks:

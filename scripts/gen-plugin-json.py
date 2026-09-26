@@ -8,11 +8,10 @@
 ADR 0005: agent-plugin.yaml is the richer format and plugin.json is a downhill
 projection of it. The plugin root is the REPOSITORY root, not adapters/claude, because
 `/plugin install` copies the plugin root and nothing above it: with the
-adapter as root, the skills and the hook install without
-`scripts/precedent.py`, the CLI every one of them drives, and the hook then
-fails closed — silently. Rooting the plugin at the repository puts the CLI
-inside the installed tree, at the same `../../../scripts/precedent.py` the
-hook already resolves in a clone.
+adapter as root, the skills and the hook install without the CLI, and the hook
+then fails closed — silently. Rooting the plugin at the repository puts the CLI
+inside the installed tree, in the `precedent` skill's `scripts/` directory,
+where the hook finds it at `../skills/precedent/scripts/precedent.py`.
 
 The cost is that skills and hooks are no longer where convention looks for
 them (`<root>/skills`, `<root>/hooks/hooks.json`), so plugin.json names both

@@ -103,8 +103,8 @@ moves an existing store to the new directory and leaves a pointer file at the de
 it, so the hook and every skill keep working with no configuration:
 
 ```bash
-uv run ~/src/precedent/scripts/precedent.py init ~/Sync/precedent
-uv run ~/src/precedent/scripts/precedent.py init   # where is it now?
+uv run ~/src/precedent/adapters/claude/skills/precedent/scripts/precedent.py init ~/Sync/precedent
+uv run ~/src/precedent/adapters/claude/skills/precedent/scripts/precedent.py init   # where is it now?
 ```
 
 The pointer beats `PRECEDENT_HOME`, which the SessionStart hook never sees. Two populated stores
@@ -152,9 +152,10 @@ project's identity is its git remote instead of its path.
 
 ## The CLI
 
-`scripts/precedent.py`, run with `uv run`. The skills drive it; you do not have to. The verdicts
-it prints are facts about the graph, and whether they apply in the case at hand is the agent's
-call (see `docs/adr/0001`).
+`adapters/claude/skills/precedent/scripts/precedent.py` plus the `precedent_cli/` package beside
+it, run with `uv run` (or without uv — see the README's [Without uv](../README.md#without-uv)).
+The skills drive it; you do not have to. The verdicts it prints are facts about the graph, and
+whether they apply in the case at hand is the agent's call (see `docs/adr/0001`).
 
 | Command | Does |
 |---|---|
@@ -177,7 +178,7 @@ call (see `docs/adr/0001`).
 `--help` on any of them for the flags.
 
 ```
-$ uv run scripts/precedent.py check --topic persistence --chose sqlite
+$ uv run adapters/claude/skills/precedent/scripts/precedent.py check --topic persistence --chose sqlite
 
 == verdict for choosing 'sqlite' ==
   CONFLICT: rejected in bot-alpha (Postgres for bot state) — Two bots already
