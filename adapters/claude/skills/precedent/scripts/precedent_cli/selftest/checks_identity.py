@@ -31,8 +31,8 @@ def _check_detect_project() -> None:
     with tempfile.TemporaryDirectory() as td:
         tmp = pathlib.Path(td)
         # Listing, not whitelisting: an unheard-of build file must still show up.
-        (tmp / "build.zig").write_text("// zig")
-        (tmp / "shard.yml").write_text("# crystal")
+        (tmp / "build.zig").write_text("// zig", encoding="utf-8")
+        (tmp / "shard.yml").write_text("# crystal", encoding="utf-8")
         (tmp / "src").mkdir()
         got = detect_project(tmp)
         assert "build.zig" in got["contents"], got
@@ -54,7 +54,7 @@ def _git_repo(root: pathlib.Path, remote: str | None = None) -> None:
     including one that signs every commit.
     """
     root.mkdir(parents=True, exist_ok=True)
-    (root / "README").write_text("selftest")
+    (root / "README").write_text("selftest", encoding="utf-8")
     _git(root, "init", "-q")
     _git(root, "add", ".")
     _git(root, "-c", "user.name=selftest", "-c", "user.email=selftest@example.invalid",
@@ -75,7 +75,7 @@ def _check_worktrees() -> None:
         base = pathlib.Path(tmp).resolve()
         main, wt = base / "main", base / "wt"
         (main / "mod").mkdir(parents=True)
-        (main / "mod" / "f").write_text("x")
+        (main / "mod" / "f").write_text("x", encoding="utf-8")
         _git_repo(main)
         _git(main, "worktree", "add", "-q", str(wt))
 

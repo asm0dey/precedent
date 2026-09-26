@@ -32,7 +32,7 @@ fail=0
 assert_primes() {  # <layout name> <path to hook>
   local name=$1 hook=$2 out guidance
   out=$(cd "$PROJECT" && bash "$hook") || true
-  if [ -z "$out" ]; then
+  if [[ -z "$out" ]]; then
     echo "FAIL: $name layout — hook printed nothing; it did not find the CLI" >&2
     fail=1
     return
@@ -46,10 +46,10 @@ assert_primes() {  # <layout name> <path to hook>
   # A path the banner prints but that does not exist is the same class of bug
   # as a mislocated CLI, and just as invisible: the hook still exits 0.
   guidance=$(printf '%s' "$out" | sed -n 's/^Full guidance: //p')
-  if [ -z "$guidance" ]; then
+  if [[ -z "$guidance" ]]; then
     echo "FAIL: $name layout — banner names no guidance file" >&2
     fail=1
-  elif [ ! -f "$guidance" ]; then
+  elif [[ ! -f "$guidance" ]]; then
     echo "FAIL: $name layout — guidance path does not resolve: $guidance" >&2
     fail=1
   else

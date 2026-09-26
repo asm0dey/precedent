@@ -106,4 +106,7 @@ jobs:
         # asserts the two adapter paths plugin.json names still exist — a
         # rename there ships an install with no skills and no hook, and
         # breaks nothing else.
-        run: uv run scripts/gen-plugin-json.py --check
+        # --locked runs pyyaml at the hashes in gen-plugin-json.py.lock
+        # (refresh with `uv lock --script scripts/gen-plugin-json.py`), and
+        # --no-build refuses to run a setup script from a source distribution.
+        run: uv run --locked --no-build scripts/gen-plugin-json.py --check

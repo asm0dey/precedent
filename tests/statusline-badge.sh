@@ -27,7 +27,8 @@ uv run --quiet "$CLI" record --project "$PROJECT" \
 
 fail=0
 badge() {  # <dir> — statusline output for a session in <dir>
-  printf '{"workspace":{"current_dir":"%s"}}' "$1" | (cd "$1" && bash "$LINE") || true
+  local dir=$1
+  printf '{"workspace":{"current_dir":"%s"}}' "$dir" | (cd "$dir" && bash "$LINE") || true
 }
 
 (cd "$PROJECT" && bash "$HOOK" >/dev/null)
@@ -52,7 +53,7 @@ fi
 # A directory with nothing to say must not carry a badge, and a later quiet
 # session must clear one an earlier session left.
 (cd "$QUIET" && bash "$HOOK" >/dev/null)
-if [ -z "$(badge "$QUIET")" ]; then
+if [[ -z "$(badge "$QUIET")" ]]; then
   echo "ok: unprimed directory renders nothing"
 else
   echo "FAIL: $QUIET has no decisions but the statusline rendered a badge" >&2
@@ -62,7 +63,7 @@ fi
 uv run --quiet "$CLI" --home "$PRECEDENT_HOME" cypher \
   "MATCH (d:Decision) DETACH DELETE d" >/dev/null 2>&1 || true
 (cd "$PROJECT" && bash "$HOOK" >/dev/null)
-if [ -z "$(badge "$PROJECT")" ]; then
+if [[ -z "$(badge "$PROJECT")" ]]; then
   echo "ok: a session with nothing to say clears the previous badge"
 else
   echo "FAIL: badge survived a session where the hook printed nothing" >&2

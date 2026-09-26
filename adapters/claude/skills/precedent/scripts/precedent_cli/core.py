@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import locale
 import os
 import pathlib
 import re
@@ -83,7 +84,13 @@ def resolve_home(home: pathlib.Path) -> pathlib.Path:
     pointer = home / POINTER
     if not pointer.is_file():
         return home
-    content = pointer.read_text().strip()
+    try:
+        content = pointer.read_text(encoding="utf-8").strip()
+    except UnicodeDecodeError:
+        # Written before 0.5.1, in the locale's codepage. Read it that way
+        # rather than lock the user out of the only copy of their journal;
+        # the next `init --location` rewrites it as UTF-8.
+        content = pointer.read_text(encoding=locale.getpreferredencoding(False)).strip()
     if not content:
         raise SystemExit(
             f"error: {pointer} is empty (contents: {content!r}). "
@@ -363,7 +370,7 @@ class Store:
 
     def log(self, op: str, payload: dict) -> None:
         """Journal first, then mutate. A crash between the two costs a replay, not data."""
-        with open(self.journal, "a") as f:
+        with open(self.journal, "a", encoding="utf-8") as f:
             # "v" is spread AFTER **payload, not before: a payload key named
             # "v" must never silently override the schema stamp — that would
             # stop stamping without a visible error, and a later replay could

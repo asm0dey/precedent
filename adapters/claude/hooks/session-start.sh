@@ -24,9 +24,9 @@ rm -f "$MARK" 2>/dev/null
 DG=""
 for candidate in "$HERE/../skills/precedent/scripts/precedent.py" \
                  "$HERE"/../../skills/*precedent/scripts/precedent.py; do
-  [ -f "$candidate" ] && { DG="$candidate"; break; }
+  [[ -f "$candidate" ]] && { DG="$candidate"; break; }
 done
-[ -n "$DG" ] || exit 0
+[[ -n "$DG" ]] || exit 0
 command -v uv >/dev/null 2>&1 || exit 0
 
 # --only-if-relevant prints nothing when this directory has no decisions and no
@@ -42,7 +42,7 @@ for t in timeout gtimeout; do
   if command -v "$t" >/dev/null 2>&1; then TIMEOUT="$t"; break; fi
 done
 BRIEF=$(${TIMEOUT:+$TIMEOUT 20} uv run --quiet "$DG" brief --project "$PWD" --only-if-relevant 2>/dev/null) || exit 0
-[ -n "$BRIEF" ] || exit 0
+[[ -n "$BRIEF" ]] || exit 0
 
 # An empty file: the statusline reads only the name, never the contents.
 mkdir -p "${MARK%/*}" 2>/dev/null && : > "$MARK" 2>/dev/null
@@ -57,7 +57,7 @@ ORDERS=$(uv run --quiet "$DG" standing-orders 2>/dev/null) || exit 0
 SKILL=""
 for candidate in "$HERE/../skills/precedent/SKILL.md" \
                  "$HERE"/../../skills/*precedent/SKILL.md; do
-  [ -f "$candidate" ] && { SKILL="$candidate"; break; }
+  [[ -f "$candidate" ]] && { SKILL="$candidate"; break; }
 done
 
 cat <<PRIME

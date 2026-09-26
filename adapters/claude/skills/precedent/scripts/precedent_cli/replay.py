@@ -44,7 +44,7 @@ def replay_journal(s: Store) -> tuple[int, list[str]]:
     # concurrent writer see no claim and start a second, interleaved replay.
     s.q("MATCH (n) WHERE NOT n:Meta DETACH DELETE n")
     n, skipped = 0, []
-    for lineno, line in enumerate(open(s.journal), 1):
+    for lineno, line in enumerate(open(s.journal, encoding="utf-8"), 1):
         line = line.strip()
         if not line:
             continue
