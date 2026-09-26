@@ -77,6 +77,7 @@ STANDING_ORDERS = """Standing orders for the rest of this session:
   you make the fork visible and draft the command.
 - Precedent is information, not a veto. Say when consistency is wrong here."""
 SCHEMA = 1          # journal line format; bump only on a breaking change
+GRAPH_FORMAT = 2    # graph layout; 2 = projects keyed by git remote (docs/adr/0009)
 
 
 class JournalTooNew(Exception):
@@ -191,6 +192,7 @@ class Store:
                 f"replays it into a fresh graph")
         if self._pending_migration is not None:
             self._finish_migration()
+        self._ensure_graph_format()
         return self
 
     def _migrate_grafeo_store(self) -> None:
@@ -290,6 +292,31 @@ class Store:
             return
         print(f"{note}; the previous store has been removed — an install that predates "
               f"this change would otherwise keep writing to it unseen)", file=sys.stderr)
+
+    def _ensure_graph_format(self) -> None:
+        """Re-key a graph laid out by an older precedent, once.
+
+        Replaying the journal is the whole migration: upsert_project keys each
+        project by its remote as the lines go in. Readers skip it — they must
+        not write, and project_info resolves older keys for them. A 0.4.x
+        `rebuild` wipes the marker along with everything else, so the next
+        writer here simply migrates again; the journal is the same, so
+        nothing is lost either way.
+        """
+        if not self.write:
+            return
+        row = self.q("MATCH (m:Meta {id:'meta'}) RETURN m.graph_format AS f")
+        if row and (row[0]["f"] or 0) >= GRAPH_FORMAT:
+            return
+        if not self.journal.exists():
+            mark_graph_format(self)
+            return
+        n, skipped = replay_journal(self)
+        # stderr: brief's stdout is injected into a model's context.
+        print(f"precedent: graph re-keyed by git remote ({n} journal entries)",
+              file=sys.stderr)
+        for msg in skipped:
+            print(f"  skipped {msg}", file=sys.stderr)
 
     def __exit__(self, *exc):
         try:
@@ -1767,6 +1794,10 @@ def cmd_maintain(a, s: Store) -> None:
     print(f"home:  {s.home}")
 
 
+def mark_graph_format(s: "Store") -> None:
+    s.q("MERGE (m:Meta {id:'meta'}) SET m.graph_format=$f", {"f": GRAPH_FORMAT})
+
+
 def replay_journal(s: Store) -> tuple[int, list[str]]:
     """Replay every journal entry into the graph, reporting what would not go.
 
@@ -1775,6 +1806,18 @@ def replay_journal(s: Store) -> tuple[int, list[str]]:
     printing: one implementation, so a store rebuilt by hand and a store
     carried across engines are built the same way.
     """
+    # Refuse a journal from a newer precedent BEFORE wiping. Stopping at the
+    # line itself, as replay_entry does, leaves a half-rebuilt graph.
+    for lineno, line in enumerate(open(s.journal), 1):
+        try:
+            e = json.loads(line) if line.strip() else {}
+        except json.JSONDecodeError:
+            continue
+        v = e.get("v", 1) if isinstance(e, dict) else 1
+        if isinstance(v, int) and v > SCHEMA:
+            raise SystemExit(f"stopping before touching the graph: journal line {lineno}"
+                             f" is schema v{v}, this precedent understands v{SCHEMA}"
+                             " — upgrade before replaying")
     s.q("MATCH (n) DETACH DELETE n")
     n, skipped = 0, []
     for lineno, line in enumerate(open(s.journal), 1):
@@ -1797,6 +1840,7 @@ def replay_journal(s: Store) -> tuple[int, list[str]]:
             skipped.append(f"line {lineno}: {e.get('op', '?')} — {type(exc).__name__}: {exc}")
             continue
         n += 1
+    mark_graph_format(s)
     return n, skipped
 
 
@@ -3491,6 +3535,64 @@ def _check_merge_project() -> None:
                 "replaying a merge whose source is gone is a no-op"
 
 
+def _check_graph_format() -> None:
+    """An older store is re-keyed once, by a writer, and never again; a
+    too-new journal is refused before anything is wiped.
+    """
+    import contextlib
+    import io
+    import tempfile
+
+    pp, old = "github.com/asm0dey/selftest-gf", "/tmp/precedent-selftest-gf"
+    meta = lambda s: s.q("MATCH (m:Meta) RETURN m.graph_format AS f")
+    with tempfile.TemporaryDirectory() as tmp_home:
+        home = pathlib.Path(tmp_home)
+        with Store(home, write=True) as s:
+            assert meta(s) == [{"f": GRAPH_FORMAT}], "a new store is marked at once"
+            # What 0.4.x leaves: path-keyed node with portable, its journal line, no marker.
+            s.log("record", {"id": "selftest-gf1", "title": "t", "statement": "t",
+                             "rationale": "", "scope": "tooling", "created": today(),
+                             "project_id": old, "project_name": "gf", "project_path": old,
+                             "portable": pp, "tags": [], "topics": [], "chose": [],
+                             "rejected": [], "supersedes": []})
+            s.q("CREATE (:Project {id:$id, name:'gf', portable:$pp, paths:$id})",
+                {"id": old, "pp": pp})
+            s.q("CREATE (:Decision {id:'selftest-gf1', status:'active'})")
+            s.q("""MATCH (d:Decision {id:'selftest-gf1'}), (p:Project {id:$id})
+                   MERGE (d)-[:IN_PROJECT]->(p)""", {"id": old})
+            s.q("MATCH (m:Meta) DETACH DELETE m")
+
+        with Store(home, write=False) as s:
+            assert meta(s) == [], "a reader must not migrate"
+
+        with contextlib.redirect_stderr(io.StringIO()):
+            with Store(home, write=True) as s:
+                assert s.q("MATCH (p:Project {id:$id}) RETURN p.id AS id", {"id": old}) == []
+                assert s.q("""MATCH (:Decision {id:'selftest-gf1'})-[:IN_PROJECT]->(p:Project)
+                              RETURN p.id AS id""") == [{"id": pp}]
+                assert meta(s) == [{"f": GRAPH_FORMAT}]
+                s.q("CREATE (:Project {id:'selftest-gf-sentinel'})")
+
+        with Store(home, write=True) as s:
+            assert s.q("MATCH (p:Project {id:'selftest-gf-sentinel'}) RETURN p.id AS id"), \
+                "a marked graph must not be replayed again"
+            # 0.4.x finds nodes by the portable property: it must still be there.
+            assert s.q("MATCH (p:Project {portable:$pp}) RETURN p.id AS id", {"pp": pp}) \
+                == [{"id": pp}]
+
+            with open(s.journal, "a", encoding="utf-8") as f:
+                f.write(json.dumps({"op": "record", "id": "selftest-gf-future",
+                                    "v": SCHEMA + 1}) + "\n")
+            n = s.q("MATCH (n) RETURN count(n) AS n")[0]["n"]
+            try:
+                replay_journal(s)
+                raise AssertionError("a too-new journal must be refused")
+            except SystemExit as exc:
+                assert "upgrade" in str(exc), exc
+            assert s.q("MATCH (n) RETURN count(n) AS n")[0]["n"] == n, \
+                "a refused replay must not have wiped the graph"
+
+
 def _check_portable_replay() -> None:
     """0.4.x `brief` journalled `project_portable` when a project gained a
     remote. Replayed now, it folds the node it names into the portable key —
@@ -3585,6 +3687,7 @@ def cmd_selftest(a, s: Store) -> None:
     _check_rekey(s)
     _check_settle()
     _check_merge_project()
+    _check_graph_format()
     _check_portable_replay()
     after = s.q("MATCH (n) RETURN count(n) AS n")[0]["n"]
     assert after == before, f"selftest changed node count {before} -> {after}"
