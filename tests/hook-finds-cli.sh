@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# The session-start hook must locate scripts/precedent.py in every layout an
-# install channel produces. It fails closed (`exit 0`, no output) when it
-# cannot, so a hook wired to the wrong path is indistinguishable from a quiet
-# session unless a test asserts the brief actually appears. That is what this
-# checks: seed a store with a decision, then run the hook from each layout and
-# require the banner.
+# The session-start hook must locate the `precedent` skill's
+# scripts/precedent.py in every layout an install channel produces. It fails
+# closed (`exit 0`, no output) when it cannot, so a hook wired to the wrong
+# path is indistinguishable from a quiet session unless a test asserts the
+# brief actually appears. That is what this checks: seed a store with a
+# decision, then run the hook from each layout and require the banner.
 set -euo pipefail
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)

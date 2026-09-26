@@ -29,8 +29,8 @@ Remove-Item -LiteralPath $mark -Force -ErrorAction SilentlyContinue
 # Resolve the CLI relative to this script, not an assumed install path. Two
 # channels lay it out differently — see the same block in session-start.sh:
 #
-#   repository / Claude Code plugin  adapters/claude/hooks/  -> ..\..\..\scripts\
-#   acr realize                      .claude\hooks\<pkg>\    -> ..\..\scripts\<pkg>\
+#   repository / Claude Code plugin  adapters/claude/hooks/  -> ..\skills\precedent\scripts\
+#   acr realize                      .claude\hooks\<pkg>\    -> ..\..\skills\acr__<owner>__<repo>__precedent\scripts\
 #
 # The ACR directory carries the package name, so its sibling is discovered
 # rather than spelled out. Get-ChildItem -Directory is PowerShell 3.0+, so it

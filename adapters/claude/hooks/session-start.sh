@@ -7,8 +7,8 @@ set -uo pipefail
 # path: this file ships under adapters/claude/ and is installed by two
 # channels that lay it out differently.
 #
-#   repository / Claude Code plugin  adapters/claude/hooks/  -> ../../../scripts/
-#   acr realize                      .claude/hooks/<pkg>/    -> ../../scripts/<pkg>/
+#   repository / Claude Code plugin  adapters/claude/hooks/  -> ../skills/precedent/scripts/
+#   acr realize                      .claude/hooks/<pkg>/    -> ../../skills/acr__<owner>__<repo>__precedent/scripts/
 #
 # The ACR directory names carry the package name, so the sibling cannot be
 # spelled out; the glob finds it whatever the package is called. A glob that
