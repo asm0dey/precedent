@@ -448,7 +448,7 @@ def _check_graph_format() -> None:
     import io
     import tempfile
 
-    pp, old = "github.com/asm0dey/selftest-gf", "/tmp/precedent-selftest-gf"
+    pp, old = "github.com/asm0dey/selftest-gf", "/nonexistent/precedent-selftest-gf"
     meta = lambda s: s.q("MATCH (m:Meta) RETURN m.graph_format AS f")
     with tempfile.TemporaryDirectory() as tmp_home:
         home = pathlib.Path(tmp_home)

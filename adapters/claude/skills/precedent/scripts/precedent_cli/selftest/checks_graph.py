@@ -279,7 +279,7 @@ def _check_verdicts(s: Store) -> None:
     """
     d = {"id": "selftest-v1", "title": "T", "statement": "T",
          "rationale": "concurrent writers", "scope": "architecture",
-         "created": today(), "project_id": "/tmp/precedent-selftest-v",
+         "created": today(), "project_id": "/nonexistent/precedent-selftest-v",
          "project_name": "selftest-v", "tags": ["selftest-v-tag"],
          "topics": ["selftest-persistence"], "chose": ["postgres"],
          "rejected": ["sqlite"], "supersedes": []}
@@ -289,7 +289,7 @@ def _check_verdicts(s: Store) -> None:
         assert "selftest-persistence" in topics, topics
     finally:
         s.q("MATCH (n) WHERE n.id STARTS WITH 'selftest-v' DETACH DELETE n")
-        s.q("""MATCH (p:Project {id:'/tmp/precedent-selftest-v'}) DETACH DELETE p""")
+        s.q("""MATCH (p:Project {id:'/nonexistent/precedent-selftest-v'}) DETACH DELETE p""")
         for name in ("selftest-persistence", "postgres", "sqlite", "selftest-v-tag"):
             s.q("""MATCH (n) WHERE (n:Topic OR n:Option OR n:Tag) AND n.name = $name
                      AND NOT EXISTS { MATCH (n)<--() } DETACH DELETE n""", {"name": name})
@@ -309,9 +309,9 @@ def _check_verdicts(s: Store) -> None:
             "tags": ["selftest-v-tag"], "topics": ["selftest-persistence"],
             "chose": ["mongo"], "rejected": ["postgres"], "supersedes": []}
     write_decision(s, {**base, "id": "selftest-v2",
-                       "project_id": "/tmp/precedent-selftest-v2", "project_name": "vA"})
+                       "project_id": "/nonexistent/precedent-selftest-v2", "project_name": "vA"})
     write_decision(s, {**base, "id": "selftest-v3",
-                       "project_id": "/tmp/precedent-selftest-v3", "project_name": "vB"})
+                       "project_id": "/nonexistent/precedent-selftest-v3", "project_name": "vB"})
     apply_regret(s, {"id": "selftest-v-lesson", "topic": "selftest-persistence",
                      "option": "mongo", "because": "schema drift",
                      "instead": "postgres",
@@ -349,8 +349,8 @@ def _check_verdicts(s: Store) -> None:
         # Two norms on one topic: mongo (2 projects) and cassandra (2 projects).
         # The exception is recorded against the mongo one only, so the
         # cassandra warning must still fire unacknowledged.
-        for n, pid in (("selftest-v4", "/tmp/precedent-selftest-v4"),
-                       ("selftest-v5", "/tmp/precedent-selftest-v5")):
+        for n, pid in (("selftest-v4", "/nonexistent/precedent-selftest-v4"),
+                       ("selftest-v5", "/nonexistent/precedent-selftest-v5")):
             write_decision(s, {**base, "id": n, "chose": ["cassandra"],
                                "rejected": [], "supersedes": [],
                                "project_id": pid, "project_name": n})
@@ -374,8 +374,8 @@ def _check_verdicts(s: Store) -> None:
         s.q("MATCH (l:Lesson {id:'selftest-v-lesson'}) DETACH DELETE l")
         s.q("MATCH (l:Lesson {id:'selftest-v-lesson-other'}) DETACH DELETE l")
         s.q("MATCH (n) WHERE n.id STARTS WITH 'selftest-v' DETACH DELETE n")
-        for pid in ("/tmp/precedent-selftest-v2", "/tmp/precedent-selftest-v3",
-                    "/tmp/precedent-selftest-v4", "/tmp/precedent-selftest-v5", here):
+        for pid in ("/nonexistent/precedent-selftest-v2", "/nonexistent/precedent-selftest-v3",
+                    "/nonexistent/precedent-selftest-v4", "/nonexistent/precedent-selftest-v5", here):
             s.q("MATCH (p:Project {id:$id}) DETACH DELETE p", {"id": pid})
         for name in ("selftest-persistence", "selftest-v-other-topic",
                       "mongo", "postgres", "sqlite", "mysql", "cassandra",
@@ -511,7 +511,7 @@ def _check_maintain(s: Store) -> None:
     """
     base = {"title": "T", "statement": "T", "rationale": "r",
             "scope": "architecture", "created": today(),
-            "project_id": "/tmp/precedent-selftest-m", "project_name": "m",
+            "project_id": "/nonexistent/precedent-selftest-m", "project_name": "m",
             "tags": [], "topics": ["selftest-caching"],
             "rejected": [], "supersedes": []}
     # Scoped to this check's own project. contradictions_in() reports the
@@ -554,7 +554,7 @@ def _check_maintain(s: Store) -> None:
         assert liveness({"id": dead, "paths": dead}) == "gone"
     finally:
         s.q("MATCH (n) WHERE n.id STARTS WITH 'selftest-m' DETACH DELETE n")
-        s.q("MATCH (p:Project {id:'/tmp/precedent-selftest-m'}) DETACH DELETE p")
+        s.q("MATCH (p:Project {id:'/nonexistent/precedent-selftest-m'}) DETACH DELETE p")
         for name in ("selftest-caching", "redis", "memcached", "hazelcast"):
             s.q("""MATCH (n) WHERE (n:Topic OR n:Option) AND n.name = $name
                      AND NOT EXISTS { MATCH (n)<--() } DETACH DELETE n""", {"name": name})
@@ -579,8 +579,8 @@ def _check_maintain_hints() -> None:
             pp = "github.com/asm0dey/selftest-mh"
             split = base / "split"
             _git_repo(split, "git@github.com:asm0dey/selftest-mh.git")
-            upsert_project(s, {"id": "/tmp/precedent-selftest-mh", "name": "mh",
-                               "path": "/tmp/precedent-selftest-mh", "portable": pp})
+            upsert_project(s, {"id": "/nonexistent/precedent-selftest-mh", "name": "mh",
+                               "path": "/nonexistent/precedent-selftest-mh", "portable": pp})
             upsert_project(s, {"id": str(split), "path": str(split), "name": "mh"})
 
             out = io.StringIO()

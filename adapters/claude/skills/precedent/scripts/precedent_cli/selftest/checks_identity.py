@@ -152,8 +152,8 @@ def _check_identity(s: Store) -> None:
     # for reads AND writes. Read-only resolution finds the existing node
     # while writes create a second one, fragmenting the graph a little more
     # with every machine and every session, invisibly.
-    linux, windows = "/tmp/precedent-selftest-i", "C:\\dev\\precedent-selftest-i"
-    unrelated = "/tmp/precedent-selftest-i-other"
+    linux, windows = "/nonexistent/precedent-selftest-i", "C:\\dev\\precedent-selftest-i"
+    unrelated = "/nonexistent/precedent-selftest-i-other"
     pp = "github.com/asm0dey/selftest-i"
     pp2 = "github.com/asm0dey/selftest-i-other"
     try:
@@ -204,7 +204,7 @@ def _check_identity_gaps(s: Store) -> None:
     import tempfile
 
     pp = "github.com/asm0dey/selftest-gap"
-    holder = "/tmp/precedent-selftest-gap-holder"
+    holder = "/nonexistent/precedent-selftest-gap-holder"
     ids = [holder, pp]
     try:
         with tempfile.TemporaryDirectory() as tmp:
@@ -255,7 +255,7 @@ def _check_rekey(s: Store) -> None:
     The one direction that must never happen is a path match folding a node
     whose remote says it is a different project.
     """
-    P = "/tmp/precedent-selftest-rk"
+    P = "/nonexistent/precedent-selftest-rk"
     pp, other = "github.com/asm0dey/selftest-rk", "github.com/asm0dey/selftest-rk-other"
     dec = lambda did, pid, path, portable: {
         "id": did, "title": "t", "statement": "t", "rationale": "", "scope": "tooling",
@@ -680,7 +680,7 @@ def _check_portable_replay() -> None:
     """
     import tempfile
 
-    pid = "/tmp/precedent-selftest-bp"
+    pid = "/nonexistent/precedent-selftest-bp"
     portable = "github.com/asm0dey/selftest-bp"
     entry = {"op": "project_portable", "project_id": pid, "portable": portable, "v": 1}
     with tempfile.TemporaryDirectory() as tmp_home:
