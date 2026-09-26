@@ -516,6 +516,28 @@ def tags_of(s: "Store", project_id: str) -> list[str]:
         {"id": project_id})]
 
 
+def refuse_missing_project(s: "Store", value: str) -> None:
+    """Exit 2 unless `--project` names a directory.
+
+    A name passed here resolves against the cwd into a path nothing lives at;
+    that path has no remote, so it keyed a fresh, untagged, invisible project
+    on every call (issue #13). Refusing is cheaper than any repair.
+    """
+    target = pathlib.Path(value)
+    if target.is_dir():
+        return
+    here = pathlib.Path.cwd().resolve()
+    msg = [f"--project {value!r} is not a directory (resolved to {target.resolve()}).",
+           "Pass a path, not a name."]
+    if value == here.name:
+        msg.append(f"You are in {here.name!r} — did you mean --project . ?")
+    elif s.q("MATCH (p:Project {name:$n}) RETURN p.id AS id LIMIT 1", {"n": value}):
+        msg.append(f"A project named {value!r} exists — pass its directory,"
+                   " or run from inside it with --project .")
+    print("\n".join(msg), file=sys.stderr)
+    raise SystemExit(2)
+
+
 def project_info(s: "Store", path: str, extra_tags: str = "") -> dict:
     """Identify this directory, resolving it onto the node that already holds it.
 
@@ -527,6 +549,7 @@ def project_info(s: "Store", path: str, extra_tags: str = "") -> dict:
     which cannot be promoted. The portable id is written onto the node by
     `upsert_project`, on the commands that already take the write lock.
     """
+    refuse_missing_project(s, path)
     info = detect_project(pathlib.Path(path))
     info["path"] = info["id"]
     info["portable"] = portable_id(pathlib.Path(info["path"]))
@@ -1992,6 +2015,48 @@ def _check_worktrees() -> None:
         assert identity_path(wt) == wt, "a worktree whose main checkout is gone keys itself"
 
 
+def _check_missing_project(s: Store) -> None:
+    """`--project calit` resolved to <cwd>/calit, a directory that does not
+    exist, and keyed a fresh untagged project every time — issue #13. It must
+    be refused, create nothing, and say what was probably meant.
+    """
+    import contextlib
+    import io
+    import tempfile
+
+    count = lambda: s.q("MATCH (p:Project) RETURN count(p) AS n")[0]["n"]
+    before = count()
+    cwd = os.getcwd()
+    named = "selftest-named-project"
+    try:
+        s.q("CREATE (:Project {id:'selftest-named-id', name:$n})", {"n": named})
+        with tempfile.TemporaryDirectory() as tmp:
+            here = pathlib.Path(tmp) / "calit"
+            here.mkdir()
+            (here / "notes.txt").write_text("x")
+            os.chdir(here)
+            try:
+                for value, hint in (("calit", "did you mean --project . ?"),
+                                    ("notes.txt", None),   # a file is not a project
+                                    (named, f"A project named {named!r} exists"),
+                                    ("nope-selftest", None)):
+                    err = io.StringIO()
+                    try:
+                        with contextlib.redirect_stderr(err):
+                            project_info(s, value)
+                        raise AssertionError(f"--project {value!r} must be refused")
+                    except SystemExit as exc:
+                        assert exc.code == 2, (value, exc.code)
+                    assert "is not a directory" in err.getvalue(), err.getvalue()
+                    if hint:
+                        assert hint in err.getvalue(), err.getvalue()
+            finally:
+                os.chdir(cwd)   # before the directory is removed: Windows cannot delete a cwd
+    finally:
+        s.q("MATCH (p:Project {id:'selftest-named-id'}) DETACH DELETE p")
+    assert count() == before, "a refused --project must create no node"
+
+
 def _check_drift() -> None:
     """Identity after trivial normalisation is a fact. Similarity is a
     judgment, and it moved to the model — difflib scored a shared prefix
@@ -2642,12 +2707,11 @@ def _check_verdicts(s: Store) -> None:
     import contextlib
     import io
 
-    # Resolve once and reuse for both the stored project id and every CLI
-    # argument in this block. On macOS /tmp is a symlink to /private/tmp, so
-    # a literal "/tmp" node id would never match pathlib.Path("/tmp").resolve()
-    # inside cmd_check's ack lookup — resolving here keeps both sides in
-    # agreement on whatever path the platform's real temp dir resolves to.
-    here = str(pathlib.Path("/tmp").resolve())
+    # A real directory (every --project must be one), resolved so the stored
+    # id and cmd_check's lookup agree — on macOS /tmp is a symlink to
+    # /private/tmp.
+    import tempfile
+    here = str(pathlib.Path(tempfile.gettempdir()).resolve())
 
     base = {"title": "T", "statement": "T", "rationale": "flexible schema",
             "scope": "architecture", "created": today(),
@@ -3182,6 +3246,7 @@ def cmd_selftest(a, s: Store) -> None:
     _check_helpers()
     _check_detect_project()
     _check_worktrees()
+    _check_missing_project(s)
     _check_drift()
     _check_projects(s)
     _check_decisions(s)
