@@ -293,6 +293,26 @@ class Store:
         print(f"{note}; the previous store has been removed — an install that predates "
               f"this change would otherwise keep writing to it unseen)", file=sys.stderr)
 
+    CLAIM_STALE_S = 300   # ponytail: a crashed migrator delays everyone this long; a heartbeat if that ever bites
+
+    def _claim_migration(self) -> bool:
+        """One statement: claim the migration, or find someone already holds it.
+
+        MERGE always finds-or-creates the Meta node; the WHERE after WITH is
+        what makes the SET conditional on nobody holding a fresh claim, so two
+        writers racing this cannot both see their own token come back.
+        """
+        tok = f"{os.getpid()}-{time.time()}"
+        now = time.time()
+        rows = self.q("""MERGE (m:Meta {id:'meta'})
+                         WITH m WHERE coalesce(m.graph_format, 0) < $f
+                           AND (m.claimed IS NULL OR m.claimed < $stale)
+                         SET m.claim=$tok, m.claimed=$now
+                         RETURN m.claim AS c""",
+                      {"f": GRAPH_FORMAT, "stale": now - self.CLAIM_STALE_S,
+                       "tok": tok, "now": now})
+        return rows == [{"c": tok}]
+
     def _ensure_graph_format(self) -> None:
         """Re-key a graph laid out by an older precedent, once.
 
@@ -307,6 +327,14 @@ class Store:
             return
         row = self.q("MATCH (m:Meta {id:'meta'}) RETURN m.graph_format AS f")
         if row and (row[0]["f"] or 0) >= GRAPH_FORMAT:
+            return
+        if not self._claim_migration():
+            # Someone else is migrating right now (or just finished and this
+            # read raced it) — readers already resolve older keys, and a
+            # second concurrent replay is exactly the interleaving this
+            # guards against. ponytail: a write that races the claimant's
+            # replay can be missing from the graph until the next `rebuild`
+            # — the same window a manual `rebuild` already has.
             return
         if not self.journal.exists():
             mark_graph_format(self)
@@ -1795,7 +1823,8 @@ def cmd_maintain(a, s: Store) -> None:
 
 
 def mark_graph_format(s: "Store") -> None:
-    s.q("MERGE (m:Meta {id:'meta'}) SET m.graph_format=$f", {"f": GRAPH_FORMAT})
+    s.q("MERGE (m:Meta {id:'meta'}) SET m.graph_format=$f, m.claim=null, m.claimed=null",
+        {"f": GRAPH_FORMAT})
 
 
 def replay_journal(s: Store) -> tuple[int, list[str]]:
@@ -1808,17 +1837,21 @@ def replay_journal(s: Store) -> tuple[int, list[str]]:
     """
     # Refuse a journal from a newer precedent BEFORE wiping. Stopping at the
     # line itself, as replay_entry does, leaves a half-rebuilt graph.
-    for lineno, line in enumerate(open(s.journal), 1):
-        try:
-            e = json.loads(line) if line.strip() else {}
-        except json.JSONDecodeError:
-            continue
-        v = e.get("v", 1) if isinstance(e, dict) else 1
-        if isinstance(v, int) and v > SCHEMA:
-            raise SystemExit(f"stopping before touching the graph: journal line {lineno}"
-                             f" is schema v{v}, this precedent understands v{SCHEMA}"
-                             " — upgrade before replaying")
-    s.q("MATCH (n) DETACH DELETE n")
+    with open(s.journal, encoding="utf-8") as f:
+        for lineno, line in enumerate(f, 1):
+            try:
+                e = json.loads(line) if line.strip() else {}
+            except json.JSONDecodeError:
+                continue
+            v = e.get("v", 1) if isinstance(e, dict) else 1
+            if isinstance(v, int) and v > SCHEMA:
+                raise SystemExit(f"stopping before touching the graph: journal line {lineno}"
+                                 f" is schema v{v}, this precedent understands v{SCHEMA}"
+                                 " — upgrade before replaying")
+    # :Meta survives its own replay — it carries the migration claim this
+    # very call may be running under, and wiping it would let another
+    # concurrent writer see no claim and start a second, interleaved replay.
+    s.q("MATCH (n) WHERE NOT n:Meta DETACH DELETE n")
     n, skipped = 0, []
     for lineno, line in enumerate(open(s.journal), 1):
         line = line.strip()
@@ -3565,13 +3598,61 @@ def _check_graph_format() -> None:
         with Store(home, write=False) as s:
             assert meta(s) == [], "a reader must not migrate"
 
-        with contextlib.redirect_stderr(io.StringIO()):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             with Store(home, write=True) as s:
                 assert s.q("MATCH (p:Project {id:$id}) RETURN p.id AS id", {"id": old}) == []
                 assert s.q("""MATCH (:Decision {id:'selftest-gf1'})-[:IN_PROJECT]->(p:Project)
                               RETURN p.id AS id""") == [{"id": pp}]
                 assert meta(s) == [{"f": GRAPH_FORMAT}]
                 s.q("CREATE (:Project {id:'selftest-gf-sentinel'})")
+        assert out.getvalue() == "", "the migration notice must never reach stdout"
+        assert "re-keyed" in err.getvalue(), err.getvalue()
+
+        # A fresh claim already held by another writer (a second SessionStart
+        # `brief` racing this one) must block a second, interleaved replay.
+        with tempfile.TemporaryDirectory() as tmp_home2:
+            home2 = pathlib.Path(tmp_home2)
+            with Store(home2, write=True) as s:
+                s.log("record", {"id": "selftest-gf2", "title": "t", "statement": "t",
+                                 "rationale": "", "scope": "tooling", "created": today(),
+                                 "project_id": old, "project_name": "gf", "project_path": old,
+                                 "portable": pp, "tags": [], "topics": [], "chose": [],
+                                 "rejected": [], "supersedes": []})
+                s.q("CREATE (:Project {id:$id, name:'gf', portable:$pp, paths:$id})",
+                    {"id": old, "pp": pp})
+                s.q("MATCH (m:Meta) SET m.graph_format=null, m.claim='other', m.claimed=$c",
+                    {"c": time.time()})
+
+            with Store(home2, write=True) as s:
+                assert s.q("MATCH (p:Project {id:$id}) RETURN p.id AS id", {"id": old}) \
+                    == [{"id": old}], "a fresh claim held elsewhere must block replay"
+                row = s.q("MATCH (m:Meta) RETURN m.graph_format AS f")[0]["f"]
+                assert (row or 0) < GRAPH_FORMAT, "an unclaimed replay must leave the format unmarked"
+
+        # A stale claim (the claimant crashed or was killed) must not wedge
+        # every future writer — someone else may migrate instead.
+        with tempfile.TemporaryDirectory() as tmp_home3:
+            home3 = pathlib.Path(tmp_home3)
+            with Store(home3, write=True) as s:
+                s.log("record", {"id": "selftest-gf3", "title": "t", "statement": "t",
+                                 "rationale": "", "scope": "tooling", "created": today(),
+                                 "project_id": old, "project_name": "gf", "project_path": old,
+                                 "portable": pp, "tags": [], "topics": [], "chose": [],
+                                 "rejected": [], "supersedes": []})
+                s.q("CREATE (:Project {id:$id, name:'gf', portable:$pp, paths:$id})",
+                    {"id": old, "pp": pp})
+                s.q("MATCH (m:Meta) SET m.graph_format=null, m.claim='other', m.claimed=$c",
+                    {"c": time.time() - 10_000})
+
+            with contextlib.redirect_stderr(io.StringIO()):
+                with Store(home3, write=True) as s:
+                    assert s.q("MATCH (p:Project {id:$id}) RETURN p.id AS id", {"id": old}) \
+                        == [], "a stale claim must not block replay"
+                    assert s.q("MATCH (p:Project {portable:$pp}) RETURN p.id AS id", {"pp": pp}) \
+                        == [{"id": pp}]
+                    row = s.q("MATCH (m:Meta) RETURN m.graph_format AS f, m.claim AS c")[0]
+                    assert row == {"f": GRAPH_FORMAT, "c": None}, row
 
         with Store(home, write=True) as s:
             assert s.q("MATCH (p:Project {id:'selftest-gf-sentinel'}) RETURN p.id AS id"), \
