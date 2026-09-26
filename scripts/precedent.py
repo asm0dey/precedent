@@ -712,41 +712,84 @@ def normalised(tag: str) -> str:
     return flat[:-1] if len(flat) > 3 and flat.endswith("s") else flat
 
 
+def legacy_keys(s: Store, key: str, portable: str | None,
+                local_paths: list[str]) -> list[str]:
+    """Nodes holding this project under a key other than `key`.
+
+    Two shapes, both left by history: a node carrying this exact portable id
+    under a path key (every node before docs/adr/0009, and what 0.4.x still
+    creates), and a node with no portable id whose paths include one of ours
+    (a repo that has since gained a remote, or a worktree keyed on its own
+    path). A node with a DIFFERENT portable is never matched by path: its
+    remote says it is another project, and a wrong merge is worse than a
+    visible split.
+    """
+    rows = s.q("""MATCH (p:Project) WHERE p.id <> $key
+                  RETURN p.id AS id, p.portable AS pp, p.paths AS paths""", {"key": key})
+    mine = set(local_paths)
+    return sorted(r["id"] for r in rows
+                  if (portable and r["pp"] == portable)
+                  or (r["pp"] is None and mine & set(paths_of(r) or [r["id"]])))
+
+
+def fold_project(s: Store, frm: str, into: str) -> int:
+    """Move one project node into another: its decisions, tags and paths.
+
+    The single operation behind every merge — `merge-project`, the re-key of
+    a node an older key left behind, and the replay of both. Decision ids do
+    not change, so every reference to one still resolves. The target keeps
+    its own name and portable id; a missing target is created from the
+    source, which makes the fold a rename. Returns the decisions moved.
+    """
+    if frm == into:
+        return 0
+    src = s.q("""MATCH (p:Project {id:$id})
+                 RETURN p.name AS name, p.seen AS seen, p.paths AS paths""", {"id": frm})
+    if not src:
+        return 0
+    src = src[0]
+    s.q("MERGE (p:Project {id:$id}) ON CREATE SET p.name=$name, p.seen=$seen",
+        {"id": into, "name": src["name"], "seen": src["seen"] or today()})
+    dst = s.q("MATCH (p:Project {id:$id}) RETURN p.paths AS paths", {"id": into})[0]
+    paths = sorted(set(paths_of(dst)) | set(paths_of(src)))
+    s.q("MATCH (p:Project {id:$id}) SET p.paths=$paths",
+        {"id": into, "paths": "\n".join(paths)})
+    moved = s.q("""MATCH (d:Decision)-[:IN_PROJECT]->(:Project {id:$f})
+                   RETURN count(d) AS n""", {"f": frm})[0]["n"]
+    s.q("""MATCH (d:Decision)-[:IN_PROJECT]->(:Project {id:$f}), (p:Project {id:$t})
+           MERGE (d)-[:IN_PROJECT]->(p)""", {"f": frm, "t": into})
+    s.q("""MATCH (:Project {id:$f})-[:TAGGED]->(t:Tag), (p:Project {id:$t})
+           MERGE (p)-[:TAGGED]->(t)""", {"f": frm, "t": into})
+    s.q("MATCH (p:Project {id:$id}) DETACH DELETE p", {"id": frm})
+    return moved
+
+
 def upsert_project(s: Store, info: dict) -> dict:
-    """Resolve by portable id first, then fall back to the native path.
+    """Key the node by the remote when there is one, by the local path when not.
 
-    The returned dict's `id` is the graph key, which may be a path from
-    another machine. `path` stays this machine's, because containment is
-    still derived from paths and must be derived from local ones.
+    `id` is the graph key. `path` stays this machine's, because containment
+    is derived from paths and must be derived from local ones. Anything the
+    project was keyed by before folds in here, on writes and on replay alike,
+    so a store converges on one node per project with no migration step to
+    remember. These folds need no journal line: replay reproduces them from
+    the `portable` and `project_path` every line already carries.
 
-    Writes resolve as well as reads. Resolving only on read finds the
-    existing node while the write beside it creates a second one, so the
-    graph fragments a little more with every machine and every session,
-    invisibly.
+    The name is set once, at creation: a write from a worktree or a clone
+    under another directory name must not rename the project for everyone.
     """
     local, portable = info["path"], info.get("portable")
-    key = local
+    key = portable or local
+    for old in legacy_keys(s, key, portable, [local]):
+        fold_project(s, old, key)
+    s.q("MERGE (p:Project {id:$id}) ON CREATE SET p.name=$name",
+        {"id": key, "name": info["name"]})
+    s.q("MATCH (p:Project {id:$id}) SET p.seen=$seen", {"id": key, "seen": today()})
     if portable:
-        # ORDER BY, because LIMIT 1 without one picks arbitrarily. Two nodes
-        # can share a portable id: a graph rebuilt from journal lines that
-        # predate this task holds one path-keyed node per machine, and a later
-        # write on each stamps the same portable onto both.
-        rows = s.q("""MATCH (p:Project {portable:$pp})
-                      RETURN p.id AS id ORDER BY p.id LIMIT 1""",
-                   {"pp": portable})
-        if rows:
-            key = rows[0]["id"]
-    s.q("""MERGE (p:Project {id:$id}) SET p.name=$name, p.seen=$seen""",
-        {"id": key, "name": info["name"], "seen": today()})
-    if portable:
-        # Backfilled on every write, so a repo that acquires a remote later
-        # gains its identity without a migration step to remember.
+        # Kept although it equals `id`: 0.4.x finds nodes by this property.
         s.q("MATCH (p:Project {id:$id}) SET p.portable=$pp", {"id": key, "pp": portable})
     row = s.q("MATCH (p:Project {id:$id}) RETURN p.paths AS paths", {"id": key})[0]
     known = paths_of(row)
     if local not in known:
-        # Sorted before it is both stored and returned: two representations of
-        # one fact is how the next reader gets it wrong.
         known = sorted(known + [local])
         s.q("MATCH (p:Project {id:$id}) SET p.paths=$paths",
             {"id": key, "paths": "\n".join(known)})
@@ -1731,14 +1774,13 @@ def replay_entry(s: Store, e: dict) -> None:
             s.q("""MATCH (:Project {id:$id})-[r:TAGGED]->(:Tag {name:$n}) DELETE r""",
                 {"id": pid, "n": t})
     elif e["op"] == "project_portable":
-        # MATCH, not upsert_project's MERGE: `brief` (the only writer of this
-        # op) never creates a node, and replay must preserve that — a node
-        # this line's project_id does not resolve to on this replay (an
-        # unlikely reordering, or a line replayed in isolation) is silently
-        # skipped rather than fabricated. Journal-order replay always plays
-        # the line that first created the node before this one.
-        s.q("MATCH (p:Project {id:$id}) SET p.portable=$pp",
-            {"id": e["project_id"], "pp": e["portable"]})
+        # Written by 0.4.x `brief` when a project gained a remote. The node it
+        # names folds into its portable key — MATCH first, because `brief`
+        # never creates a node and its journal line must not either.
+        if s.q("MATCH (p:Project {id:$id}) RETURN p.id AS id", {"id": e["project_id"]}):
+            fold_project(s, e["project_id"], e["portable"])
+            s.q("MATCH (p:Project {id:$id}) SET p.portable=$pp",
+                {"id": e["portable"], "pp": e["portable"]})
     elif e["op"] == "regret":
         apply_regret(s, e)
     elif e["op"] == "amend":
@@ -2137,7 +2179,7 @@ def _check_projects(s: Store) -> None:
         # must too: a failing assertion above used to leak six Project nodes,
         # and the NEXT run then tripped the node-count invariant in
         # cmd_selftest — an error naming a check that was never at fault.
-        for pid in (proj, other, root, mod, sibling, win):
+        for pid in (proj, other, root, mod, sibling, win, "github.com/asm0dey/selftest-c"):
             s.q("MATCH (p:Project {id:$id}) DETACH DELETE p", {"id": pid})
         for t in ("selftest-monorepo", "selftest-backend", "selftest-java"):
             s.q("""MATCH (n:Tag {name:$n}) WHERE NOT EXISTS { MATCH (n)<--() }
@@ -3026,11 +3068,11 @@ def _check_identity(s: Store) -> None:
                                     "portable": pp})
         b_info = upsert_project(s, {"id": windows, "path": windows, "name": "i",
                                     "portable": pp})
-        assert a_info["id"] == linux, a_info
-        assert b_info["id"] == linux, "the second sighting must resolve onto the first"
+        assert a_info["id"] == pp, a_info
+        assert b_info["id"] == pp, "the second sighting must resolve onto the same node"
         assert s.q("MATCH (p:Project {portable:$pp}) RETURN count(p) AS n",
                    {"pp": pp}) == [{"n": 1}], "one repo, one node"
-        row = s.q("MATCH (p:Project {id:$id}) RETURN p.paths AS paths", {"id": linux})[0]
+        row = s.q("MATCH (p:Project {id:$id}) RETURN p.paths AS paths", {"id": pp})[0]
         assert set(paths_of(row)) == {linux, windows}, row
 
         # The other direction, and the one that cannot be undone: convergence
@@ -3041,17 +3083,16 @@ def _check_identity(s: Store) -> None:
         # — same name, sibling path, same session.
         c_info = upsert_project(s, {"id": unrelated, "path": unrelated, "name": "i",
                                     "portable": pp2})
-        assert c_info["id"] == unrelated, \
-            "a different remote must not resolve onto another repo's node"
+        assert c_info["id"] == pp2, "a different remote must key a different node"
         assert set(paths_of(s.q("MATCH (p:Project {id:$id}) RETURN p.paths AS paths",
-                                {"id": unrelated})[0])) == {unrelated}, \
+                                {"id": pp2})[0])) == {unrelated}, \
             "a distinct repo must not inherit the other one's paths"
         assert s.q("MATCH (p:Project {portable:$pp}) RETURN count(p) AS n",
                    {"pp": pp}) == [{"n": 1}], "two repos, two nodes"
         assert s.q("MATCH (p:Project) WHERE p.portable IN $pps RETURN count(p) AS n",
                    {"pps": [pp, pp2]}) == [{"n": 2}], "two repos, two nodes"
     finally:
-        for pid in (linux, windows, unrelated):
+        for pid in (linux, windows, unrelated, pp, pp2):
             s.q("MATCH (p:Project {id:$id}) DETACH DELETE p", {"id": pid})
 
 
@@ -3071,7 +3112,7 @@ def _check_identity_gaps(s: Store) -> None:
 
     pp = "github.com/asm0dey/selftest-gap"
     holder = "/tmp/precedent-selftest-gap-holder"
-    ids = [holder]
+    ids = [holder, pp]
     try:
         with tempfile.TemporaryDirectory() as tmp:
             split = pathlib.Path(tmp) / "split"   # a real checkout of that repo
@@ -3097,10 +3138,10 @@ def _check_identity_gaps(s: Store) -> None:
                                "name": "gap", "portable": None})
 
             gaps = {g["id"]: g for g in identity_gaps(s)}
-            assert holder not in gaps, "a project that HAS an identity is not a gap"
+            assert pp not in gaps, "a project that HAS an identity is not a gap"
             assert str(split) in gaps and str(bare) in gaps, gaps
             twin = gaps[str(split)]["twin"]
-            assert twin and twin["id"] == holder, \
+            assert twin and twin["id"] == pp, \
                 f"the split must be reported against the node holding the remote: {gaps}"
             assert gaps[str(split)]["portable"] == pp, gaps[str(split)]
             # Same name, sibling path, same session — everything a heuristic
@@ -3113,93 +3154,112 @@ def _check_identity_gaps(s: Store) -> None:
             s.q("MATCH (p:Project {id:$id}) DETACH DELETE p", {"id": pid})
 
 
-def _check_backfill_replay() -> None:
-    """A backfilled portable id must survive a rebuild — Ruling 26.
+def _check_rekey(s: Store) -> None:
+    """One node per project, keyed by its remote — and every older key folds in.
 
-    graph.db is the index; journal.jsonl is the source of truth, and
-    `rebuild` replays it into a fresh graph. A mutation with no journal
-    entry is invisible to that replay and is lost the moment someone runs
-    `rebuild` — silently, since nothing about `brief` or `rebuild` fails.
+    Older keys are history, not choice: every node before this change was
+    path-keyed, and 0.4.x still creates path-keyed nodes carrying `portable`.
+    The one direction that must never happen is a path match folding a node
+    whose remote says it is a different project.
+    """
+    P = "/tmp/precedent-selftest-rk"
+    pp, other = "github.com/asm0dey/selftest-rk", "github.com/asm0dey/selftest-rk-other"
+    dec = lambda did, pid, path, portable: {
+        "id": did, "title": "t", "statement": "t", "rationale": "", "scope": "tooling",
+        "created": today(), "project_id": pid, "project_name": "rk",
+        "project_path": path, "portable": portable,
+        "tags": [], "topics": [], "chose": [], "rejected": [], "supersedes": []}
+    in_project = lambda did: s.q(
+        "MATCH (:Decision {id:$d})-[:IN_PROJECT]->(p:Project) RETURN p.id AS id", {"d": did})
+    node = lambda pid: s.q("MATCH (p:Project {id:$id}) RETURN p.name AS name, p.paths AS paths,"
+                           " p.portable AS pp", {"id": pid})
+    wipe = lambda: (s.q("MATCH (n) WHERE n.id STARTS WITH 'selftest-rk' DETACH DELETE n"),
+                    s.q("MATCH (p:Project) WHERE p.id IN $ids DETACH DELETE p",
+                        {"ids": [P, P + "-b", pp, other]}),
+                    s.q("""MATCH (t:Tag {name:'selftest-rk-tag'})
+                           WHERE NOT EXISTS { MATCH (t)<--() } DETACH DELETE t"""))
+    try:
+        # fold_project: decisions, tags and paths move; the source goes; the target keeps its name.
+        upsert_project(s, {"id": P, "path": P, "name": "src"})
+        upsert_project(s, {"id": P + "-b", "path": P + "-b", "name": "dst"})
+        attach_tags(s, P, ["selftest-rk-tag"])
+        write_decision(s, dec("selftest-rk1", P, P, None))
+        assert fold_project(s, P, P + "-b") == 1
+        assert node(P) == [], "the source node must be gone"
+        assert in_project("selftest-rk1") == [{"id": P + "-b"}]
+        assert "selftest-rk-tag" in tags_of(s, P + "-b")
+        assert set(paths_of(node(P + "-b")[0])) == {P, P + "-b"}
+        assert node(P + "-b")[0]["name"] == "dst", "the target keeps its name"
+        assert fold_project(s, "selftest-rk-missing", P + "-b") == 0, "a missing source is a no-op"
+        wipe()
 
-    This exercises replay_entry directly rather than cmd_rebuild, the way
-    _check_journal does, because rebuild deletes every node first.
+        # 0.4.x shape: path-keyed node carrying the portable id. The next write re-keys it.
+        s.q("CREATE (:Project {id:$id, name:'rk', portable:$pp, paths:$id})", {"id": P, "pp": pp})
+        s.q("CREATE (:Decision {id:'selftest-rk2', status:'active'})")
+        s.q("MATCH (d:Decision {id:'selftest-rk2'}), (p:Project {id:$id}) MERGE (d)-[:IN_PROJECT]->(p)",
+            {"id": P})
+        got = upsert_project(s, {"id": P, "path": P, "name": "rk", "portable": pp})
+        assert got["id"] == pp, got
+        assert node(P) == [] and in_project("selftest-rk2") == [{"id": pp}]
+        wipe()
 
-    Takes no Store: backfill_portable calls Store.log, so running it against
-    the selftest's own store appends a real line to a real append-only
-    journal on every run — permanently, and to the user's own journal when
-    `selftest` runs without --home. The node-count invariant cannot see it,
-    because the node is deleted and only the journal grows; a later `rebuild`
-    then counts those lines as legitimate history. Same rule and same remedy
-    as _check_verdicts' cmd_principle block: a throwaway Store in a
-    throwaway directory, which TemporaryDirectory removes on the way out.
+        # A repo that gained a remote: its portable-less path node folds in.
+        write_decision(s, dec("selftest-rk3", P, P, None))
+        upsert_project(s, {"id": P, "path": P, "name": "rk", "portable": pp})
+        assert in_project("selftest-rk3") == [{"id": pp}] and node(P) == []
+        wipe()
+
+        # A DIFFERENT remote at the same path is another project: never folded.
+        upsert_project(s, {"id": P, "path": P, "name": "rk", "portable": other})
+        upsert_project(s, {"id": P, "path": P, "name": "rk", "portable": pp})
+        assert node(other) and node(pp), "a different portable must not fold on a path match"
+        wipe()
+
+        # The name is fixed when the node is created.
+        upsert_project(s, {"id": P, "path": P, "name": "first", "portable": pp})
+        upsert_project(s, {"id": P, "path": P + "-b", "name": "second", "portable": pp})
+        assert node(pp)[0]["name"] == "first", node(pp)
+        wipe()
+
+        # Replay: an old path-keyed record line, then one carrying the portable id.
+        replay_entry(s, {"op": "record", **dec("selftest-rk4", P, P, None)})
+        replay_entry(s, {"op": "record", **dec("selftest-rk5", pp, P, pp)})
+        assert in_project("selftest-rk4") == [{"id": pp}] == in_project("selftest-rk5")
+        assert node(P) == [], "replay must converge on one node per repo"
+    finally:
+        wipe()
+
+
+def _check_portable_replay() -> None:
+    """0.4.x `brief` journalled `project_portable` when a project gained a
+    remote. Replayed now, it folds the node it names into the portable key —
+    and, as before, never creates a node.
+
+    Throwaway Store: `Store.log` appends to a real append-only journal.
     """
     import tempfile
 
     pid = "/tmp/precedent-selftest-bp"
     portable = "github.com/asm0dey/selftest-bp"
-    # A throwaway store starts with no journal at all, so every read of it
-    # here tolerates that: a bare open() would raise FileNotFoundError and
-    # hide the assertion that is the point of the check.
-    def journal_lines(st: Store) -> list[str]:
-        return (st.journal.read_text(encoding="utf-8").splitlines()
-                if st.journal.exists() else [])
-
+    entry = {"op": "project_portable", "project_id": pid, "portable": portable, "v": 1}
     with tempfile.TemporaryDirectory() as tmp_home:
         with Store(pathlib.Path(tmp_home), write=True) as s:
-            # An existing, portable-less node — the exact shape backfill_portable
-            # requires before it will write anything.
             upsert_project(s, {"id": pid, "path": pid, "name": "bp", "portable": None})
-            before = len(journal_lines(s))
-
-            backfill_portable(s, {"id": pid, "portable": portable})
-            assert s.q("MATCH (p:Project {id:$id}) RETURN p.portable AS pp",
-                       {"id": pid}) == [{"pp": portable}]
-            lines = journal_lines(s)
-            assert len(lines) == before + 1, \
-                "backfill_portable must journal exactly one line, or rebuild forgets it"
-            entry = json.loads(lines[-1])
-            assert entry["op"] == "project_portable", entry
-            assert entry["project_id"] == pid and entry["portable"] == portable, entry
-            # Spec A4: every journal line carries its schema version. Without
-            # the stamp, replay_entry's refusal of a future version has
-            # nothing to read and a v2 line replays as v1 — the exact
-            # half-succeeding rebuild the version exists to prevent.
-            assert entry.get("v") == SCHEMA, \
-                f"Store.log must stamp the schema version on every line: {entry}"
-
-            # And the stamp must win over the payload. It is spread AFTER
-            # **payload for this reason, so a payload key called "v" cannot
-            # shadow it; written the other way round the stamping stops with
-            # no visible error anywhere.
-            s.log("project_portable", {"project_id": pid, "portable": portable, "v": 99})
-            shadowed = json.loads(journal_lines(s)[-1])
-            assert shadowed.get("v") == SCHEMA, \
-                f"a payload key named 'v' must not shadow the schema stamp: {shadowed}"
-
-            # Simulate the loss `rebuild` would cause without it: what a graph
-            # freshly rebuilt up to (but not including) this journal line would
-            # look like, then replay just this line.
-            s.q("MATCH (p:Project {id:$id}) SET p.portable=null", {"id": pid})
-            assert s.q("MATCH (p:Project {id:$id}) RETURN p.portable AS pp",
-                       {"id": pid}) == [{"pp": None}]
             replay_entry(s, entry)
-            assert s.q("MATCH (p:Project {id:$id}) RETURN p.portable AS pp",
-                       {"id": pid}) == [{"pp": portable}], \
-                "a backfilled portable id must survive a replay"
+            assert s.q("MATCH (p:Project {id:$id}) RETURN p.id AS id", {"id": pid}) == []
+            assert s.q("MATCH (p:Project {id:$id}) RETURN p.portable AS pp, p.paths AS paths",
+                       {"id": portable}) == [{"pp": portable, "paths": pid}]
 
-            # Idempotent: the node carries a portable id again, so a further
-            # call must neither write nor journal.
-            journalled = len(journal_lines(s))
-            backfill_portable(s, {"id": pid, "portable": portable})
-            assert len(journal_lines(s)) == journalled, \
-                "backfill_portable must not re-journal once the node carries a portable id"
-
-            # Replay must never create the node this line refers to — brief's own
-            # never-create rule extends to the journal line it writes.
-            s.q("MATCH (p:Project {id:$id}) DETACH DELETE p", {"id": pid})
+            s.q("MATCH (p:Project) DETACH DELETE p")
             replay_entry(s, entry)
-            assert s.q("MATCH (p:Project {id:$id}) RETURN p.id AS id", {"id": pid}) == [], \
+            assert s.q("MATCH (p:Project) RETURN count(p) AS n") == [{"n": 0}], \
                 "replaying a project_portable line must not create a node"
+
+            # Spec A4: the schema stamp is written after the payload, so a
+            # payload key named "v" cannot shadow it.
+            s.log("project_portable", {"project_id": pid, "portable": portable, "v": 99})
+            last = json.loads(s.journal.read_text(encoding="utf-8").splitlines()[-1])
+            assert last["v"] == SCHEMA, last
 
 
 def _check_standing_orders() -> None:
@@ -3261,7 +3321,8 @@ def cmd_selftest(a, s: Store) -> None:
     _check_maintain(s)
     _check_identity(s)
     _check_identity_gaps(s)
-    _check_backfill_replay()
+    _check_rekey(s)
+    _check_portable_replay()
     after = s.q("MATCH (n) RETURN count(n) AS n")[0]["n"]
     assert after == before, f"selftest changed node count {before} -> {after}"
     print(f"selftest ok ({before} nodes, unchanged)")
