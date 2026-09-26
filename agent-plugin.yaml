@@ -29,8 +29,6 @@ artifacts:
     - id: precedent-tag
       path: adapters/claude/skills/precedent-tag
   scripts:
-    - id: precedent-cli
-      path: scripts/precedent.py
     - id: statusline
       path: adapters/claude/hooks/statusline.sh
   hooks:

@@ -7,8 +7,8 @@ set -uo pipefail
 # path: this file ships under adapters/claude/ and is installed by two
 # channels that lay it out differently.
 #
-#   repository / Claude Code plugin  adapters/claude/hooks/  -> ../../../scripts/
-#   acr realize                      .claude/hooks/<pkg>/    -> ../../scripts/<pkg>/
+#   repository / Claude Code plugin  adapters/claude/hooks/  -> ../skills/precedent/scripts/
+#   acr realize                      .claude/hooks/<pkg>/    -> ../../skills/acr__<owner>__<repo>__precedent/scripts/
 #
 # The ACR directory names carry the package name, so the sibling cannot be
 # spelled out; the glob finds it whatever the package is called. A glob that
@@ -22,8 +22,8 @@ HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 MARK="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.precedent-primed/${PWD//[^A-Za-z0-9-]/_}"
 rm -f "$MARK" 2>/dev/null
 DG=""
-for candidate in "$HERE/../../../scripts/precedent.py" \
-                 "$HERE"/../../scripts/*/precedent.py; do
+for candidate in "$HERE/../skills/precedent/scripts/precedent.py" \
+                 "$HERE"/../../skills/*precedent/scripts/precedent.py; do
   [ -f "$candidate" ] && { DG="$candidate"; break; }
 done
 [ -n "$DG" ] || exit 0

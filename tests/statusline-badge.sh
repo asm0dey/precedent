@@ -8,7 +8,7 @@
 set -euo pipefail
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
-CLI="$ROOT/scripts/precedent.py"
+CLI="$ROOT/adapters/claude/skills/precedent/scripts/precedent.py"
 HOOK="$ROOT/adapters/claude/hooks/session-start.sh"
 LINE="$ROOT/adapters/claude/hooks/statusline.sh"
 WORK=$(mktemp -d)

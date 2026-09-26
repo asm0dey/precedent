@@ -29,17 +29,17 @@ Remove-Item -LiteralPath $mark -Force -ErrorAction SilentlyContinue
 # Resolve the CLI relative to this script, not an assumed install path. Two
 # channels lay it out differently — see the same block in session-start.sh:
 #
-#   repository / Claude Code plugin  adapters/claude/hooks/  -> ..\..\..\scripts\
-#   acr realize                      .claude\hooks\<pkg>\    -> ..\..\scripts\<pkg>\
+#   repository / Claude Code plugin  adapters/claude/hooks/  -> ..\skills\precedent\scripts\
+#   acr realize                      .claude\hooks\<pkg>\    -> ..\..\skills\acr__<owner>__<repo>__precedent\scripts\
 #
 # The ACR directory carries the package name, so its sibling is discovered
 # rather than spelled out. Get-ChildItem -Directory is PowerShell 3.0+, so it
 # is available under the 5.1 fallback this script still has to run on.
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
-$candidates = @(Join-Path $here '..\..\..\scripts\precedent.py')
-$candidates += Get-ChildItem -Path (Join-Path $here '..\..\scripts') -Directory `
-    -ErrorAction SilentlyContinue | ForEach-Object {
-        Join-Path $_.FullName 'precedent.py'
+$candidates = @(Join-Path $here '..\skills\precedent\scripts\precedent.py')
+$candidates += Get-ChildItem -Path (Join-Path $here '..\..\skills') -Directory `
+    -Filter '*precedent' -ErrorAction SilentlyContinue | ForEach-Object {
+        Join-Path $_.FullName 'scripts\precedent.py'
     }
 $dg = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
 if (-not $dg) { exit 0 }
