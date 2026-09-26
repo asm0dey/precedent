@@ -1519,21 +1519,73 @@ def apply_tag_merge(s: Store, frm: str, to: str) -> None:
     s.q("""MATCH (t:Tag {name:$f}) DETACH DELETE t""", {"f": frm})
 
 
-def contradictions_in(s: "Store") -> list[dict]:
+def cmd_merge_project(a, s: Store) -> None:
+    """Fold one project node into another — the repair for a ghost (#13).
+
+    Built for an agent: `--from` is the exact id `maintain` prints (a ghost
+    has no directory to name it by), `--into` is an id or a live path, so `.`
+    works from inside the real project. A wrong id lists near-misses instead
+    of guessing, so the next call can be right. Whether two histories are one
+    project is the caller's judgment; this carries it out, journalled.
+    """
+    exists = lambda pid: bool(s.q("MATCH (p:Project {id:$id}) RETURN p.id AS id",
+                                  {"id": pid}))
+    if not exists(a.frm):
+        v = a.frm.lower()
+        near = [r for r in s.q("MATCH (p:Project) RETURN p.id AS id, p.name AS name ORDER BY p.id")
+                if v in r["id"].lower() or v in (r["name"] or "").lower()][:5]
+        print(f"no project has the id {a.frm!r}.", file=sys.stderr)
+        for r in near:
+            print(f"  {r['name']}  {r['id']}", file=sys.stderr)
+        if not near:
+            print("  `precedent.py maintain` lists project ids", file=sys.stderr)
+        raise SystemExit(2)
+    if exists(a.into):
+        into = a.into
+    else:
+        info = project_info(s, a.into)            # exits 2 unless a directory
+        if a.frm in info["legacy"]:
+            settle(s, info)
+            print(f"{a.frm} was an older key of {info['key']} — folded into it")
+            return
+        if info["key"] == a.frm:
+            into = a.frm
+        else:
+            settle(s, info)
+            into = upsert_project(s, info)["id"]
+    if into == a.frm:
+        print(f"{a.frm!r} and {a.into!r} are the same project.", file=sys.stderr)
+        raise SystemExit(2)
+    s.log("project_merge", {"from": a.frm, "into": into})
+    moved = fold_project(s, a.frm, into)
+    print(f"merged {a.frm} into {into} — {moved} decision(s) moved")
+    for r in contradictions_in(s, into):
+        print(f"  now contradicting: {r['project']}/{r['topic']} — supersede one:")
+        for did, opts in sorted(r["decisions"].items()):
+            print(f"     {','.join(opts)}  #{did}")
+
+
+def contradictions_in(s: "Store", project_id: str | None = None) -> list[dict]:
     """Two live decisions in one project answering one topic differently.
 
     Grouped by decision id, not by project+topic: `record --chose redis,memcached`
     is one decision picking a stack, and reporting it as a clash asks the user
     to supersede a decision that is correct.
+
+    `project_id` scopes the report to one project's own node — used right
+    after a merge, where only the clashes the merge itself just created
+    matter, not everything else already live in the graph.
     """
     rows = s.q("""MATCH (d:Decision)-[:ABOUT]->(t:Topic),
                         (d)-[:CHOSE]->(o:Option),
                         (d)-[:IN_PROJECT]->(p:Project)
                   WHERE d.status='active'
-                  RETURN p.name AS pname, t.name AS topic, d.id AS did,
+                  RETURN p.id AS pid, p.name AS pname, t.name AS topic, d.id AS did,
                          collect(DISTINCT o.name) AS opts""")
     grouped: dict[tuple[str, str], dict[str, list[str]]] = {}
     for r in rows:
+        if project_id and r["pid"] != project_id:
+            continue
         grouped.setdefault((r["pname"], r["topic"]), {})[r["did"]] = sorted(r["opts"])
     out = []
     for (pname, topic), decisions in sorted(grouped.items()):
@@ -2633,6 +2685,7 @@ def _check_lock_modes() -> None:
         "brief": True,          # settle() folds older keys
         "cypher": True,         # arbitrary query text; CREATE is unknowable up front
         "init": True,           # returns before any Store is opened
+        "merge-project": True,  # folds one project into another
     }
     p = build_parser()
     subparsers = [x for x in p._actions if isinstance(x, argparse._SubParsersAction)]
@@ -3361,6 +3414,83 @@ def _check_settle() -> None:
             assert info["path"] == str(M2) and info["name"] == "main2", info
 
 
+def _check_merge_project() -> None:
+    """The #13 repair, as one journalled command an agent can run.
+
+    Throwaway Store: merge-project journals.
+    """
+    import argparse
+    import contextlib
+    import io
+    import tempfile
+
+    ghost = os.path.join(os.sep + "nonexistent-precedent-selftest", "calit", "calit")
+    run = lambda s, frm, into: cmd_merge_project(argparse.Namespace(frm=frm, into=into), s)
+
+    def refused(s, frm, into) -> str:
+        err = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+                run(s, frm, into)
+            raise AssertionError(f"merge-project {frm!r} -> {into!r} must be refused")
+        except SystemExit as exc:
+            assert exc.code == 2, exc.code
+        return err.getvalue()
+
+    with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as tmp_home:
+        real = pathlib.Path(tmp).resolve() / "calit"
+        real.mkdir()
+        with Store(pathlib.Path(tmp_home), write=True) as s:
+            dec = lambda did, pid, chose: {
+                "id": did, "title": did, "statement": did, "rationale": "", "scope": "tooling",
+                "created": today(), "project_id": pid, "project_name": "calit",
+                "project_path": pid, "portable": None, "tags": [], "topics": ["cache"],
+                "chose": [chose], "rejected": [], "supersedes": []}
+            for d in (dec("selftest-mp1", ghost, "redis"), dec("selftest-mp2", str(real), "memcached")):
+                s.log("record", d)
+                write_decision(s, d)
+            attach_tags(s, ghost, ["selftest-ghost"])
+
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                run(s, ghost, str(real))
+            assert s.q("MATCH (p:Project {id:$id}) RETURN p.id AS id", {"id": ghost}) == []
+            assert {r["d"] for r in s.q("""MATCH (d:Decision)-[:IN_PROJECT]->(:Project {id:$id})
+                                            RETURN d.id AS d""", {"id": str(real)})} \
+                == {"selftest-mp1", "selftest-mp2"}
+            assert "selftest-ghost" in tags_of(s, str(real))
+            assert "cache" in out.getvalue(), "contradictions it creates must be shown"
+            last = json.loads(s.journal.read_text(encoding="utf-8").splitlines()[-1])
+            assert (last["op"], last["from"], last["into"], last["v"]) \
+                == ("project_merge", ghost, str(real), 1), last
+
+            replay_journal(s)
+            assert {r["d"] for r in s.q("""MATCH (d:Decision)-[:IN_PROJECT]->(:Project {id:$id})
+                                            RETURN d.id AS d""", {"id": str(real)})} \
+                == {"selftest-mp1", "selftest-mp2"}, "rebuild must reproduce the merge"
+
+            assert "calit" in refused(s, "calit", str(real)), "near-matches must be listed"
+            assert "same project" in refused(s, str(real), str(real))
+            refused(s, str(real), os.path.join(tmp, "missing-dir"))
+
+            # --from is this project's own older key: folded, not an error.
+            # `--into` is a path spelled unlike the node id ("<real>/."), so it
+            # resolves through project_info — the way `--into .` does.
+            older = os.path.join(os.sep + "nonexistent-precedent-selftest", "older")
+            s.q("CREATE (:Project {id:$id, name:'calit', paths:$p})",
+                {"id": older, "p": str(real)})
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                run(s, older, os.path.join(str(real), "."))
+            assert "merged" in out.getvalue(), out.getvalue()
+            assert s.q("MATCH (p:Project {id:$id}) RETURN p.id AS id", {"id": older}) == []
+
+            n = s.q("MATCH (p:Project) RETURN count(p) AS n")[0]["n"]
+            replay_entry(s, {"op": "project_merge", "from": "selftest-nope", "into": str(real)})
+            assert s.q("MATCH (p:Project) RETURN count(p) AS n")[0]["n"] == n, \
+                "replaying a merge whose source is gone is a no-op"
+
+
 def _check_portable_replay() -> None:
     """0.4.x `brief` journalled `project_portable` when a project gained a
     remote. Replayed now, it folds the node it names into the portable key —
@@ -3454,6 +3584,7 @@ def cmd_selftest(a, s: Store) -> None:
     _check_identity_gaps(s)
     _check_rekey(s)
     _check_settle()
+    _check_merge_project()
     _check_portable_replay()
     after = s.q("MATCH (n) RETURN count(n) AS n")[0]["n"]
     assert after == before, f"selftest changed node count {before} -> {after}"
@@ -3537,6 +3668,14 @@ def build_parser() -> argparse.ArgumentParser:
     tg.add_argument("--merge", default="", help="retag every project carrying this tag")
     tg.add_argument("--into", default="", help="the tag --merge should fold into")
     tg.set_defaults(writes=True, fn=cmd_tag)
+
+    mp = sub.add_parser("merge-project",
+                        help="fold one project node into another (repair a ghost or a split)")
+    mp.add_argument("--from", dest="frm", required=True,
+                    help="exact project id to fold away, as `maintain` prints it")
+    mp.add_argument("--into", required=True,
+                    help="project id, or a directory such as . for the project you are in")
+    mp.set_defaults(writes=True, fn=cmd_merge_project)
 
     rg = sub.add_parser("regret",
                         help="mark a repeated choice as a mistake, inverting its precedent")
