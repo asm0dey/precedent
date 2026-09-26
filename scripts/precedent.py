@@ -1741,6 +1741,44 @@ def identity_gaps(s: "Store") -> list[dict]:
     return out
 
 
+def remote_changes(s: "Store") -> list[dict]:
+    """Pairs of remote-keyed nodes sharing a checkout that is on this machine.
+
+    `git remote set-url` (a rename, a move to another host) gives the same
+    checkout a new portable id, and the conservative rule — a different
+    portable is never folded on a path match — keys a fresh node for it. That
+    split is deliberate and silent; this is where it stops being silent.
+
+    `current` is what the checkout reports now, when it is one of the pair:
+    the node the next write lands on, so the natural merge target. Otherwise
+    neither side is the live one and no direction is offered.
+    Reports, never merges: two remotes can also be a fork and its upstream.
+    """
+    rows = s.q("""MATCH (p:Project) WHERE p.portable IS NOT NULL
+                  RETURN p.id AS id, p.name AS name, p.paths AS paths,
+                         p.portable AS portable""")
+    holders: dict[str, list[dict]] = {}
+    for r in rows:
+        for p in paths_of(r):
+            holders.setdefault(p, []).append(r)
+    out, seen = [], set()
+    for path, rs in sorted(holders.items()):
+        if len({r["portable"] for r in rs}) < 2 or not pathlib.Path(path).exists():
+            continue
+        current = portable_id(pathlib.Path(path))
+        for i, a_ in enumerate(rs):
+            for b_ in rs[i + 1:]:
+                pair = tuple(sorted((a_["id"], b_["id"])))
+                if a_["portable"] == b_["portable"] or pair in seen:
+                    continue
+                seen.add(pair)
+                new = next((x for x in (a_, b_) if x["portable"] == current), None)
+                old = (b_ if new is a_ else a_) if new else None
+                out.append({"path": path, "nodes": sorted((a_, b_), key=lambda x: x["id"]),
+                            "old": old, "new": new})
+    return out
+
+
 def superseded_engine_leftovers(s: "Store") -> list[pathlib.Path]:
     """Store files no current code reads: the pre-swap graph and its sidecars.
 
@@ -1849,6 +1887,24 @@ def cmd_maintain(a, s: Store) -> None:
         else:
             print(f"  {g['name']}  ({g['id']})  — not on this machine, so its"
                   " remote cannot be read here")
+
+    moved = remote_changes(s)
+    print(f"\n== one checkout, two remotes: a remote changed ({len(moved)}) ==")
+    if not moved:
+        print("  none")
+    for m in moved:
+        a_, b_ = m["nodes"]
+        print(f"  {a_['name']} ({a_['id']}) and {b_['name']} ({b_['id']})"
+              f" — both hold {m['path']}")
+        if m["new"]:
+            print(f"     the checkout now reports {m['new']['id']}: new decisions land there,")
+            print("     the other history is stranded. A renamed or moved repo is one project,")
+            print("     a fork and its upstream are two — check both sides, then:")
+            print(f'       precedent.py merge-project --from "{m["old"]["id"]}"'
+                  f' --into "{m["new"]["id"]}"')
+        else:
+            print("     the checkout reports neither remote now; check both before"
+                  " merging with precedent.py merge-project")
 
     orphans = s.q("""MATCH (n) WHERE (n:Topic OR n:Option)
                        AND NOT EXISTS { MATCH (n)<--() }
@@ -3717,6 +3773,44 @@ def _check_merged_into_portable() -> None:
             assert s.q("MATCH (p:Project) RETURN count(p) AS n")[0]["n"] == n, "rebuild too"
 
 
+def _check_remote_changed() -> None:
+    """A checkout whose remote changed keys a new node; maintain must say so.
+
+    The conservative rule (a different portable is never folded on a path
+    match) makes `git remote set-url` a silent split: the history drops out
+    of `brief`, and all maintain showed was two projects with one name.
+
+    Throwaway Store: record journals.
+    """
+    import argparse
+    import contextlib
+    import io
+    import tempfile
+
+    old, new = "github.com/asm0dey/selftest-rc", "github.com/asm0dey/selftest-rc-renamed"
+    with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as tmp_home:
+        repo = pathlib.Path(tmp).resolve() / "rc"
+        _git_repo(repo, "git@github.com:asm0dey/selftest-rc.git")
+        with Store(pathlib.Path(tmp_home), write=True) as s:
+            record = lambda did: cmd_record(build_parser().parse_args(
+                ["record", "--project", str(repo), "--title", did, "--id", did,
+                 "--rationale", "r"]), s)
+            with contextlib.redirect_stdout(io.StringIO()):
+                record("selftest-rc1")
+                _git(repo, "remote", "set-url", "origin",
+                     "git@github.com:asm0dey/selftest-rc-renamed.git")
+                record("selftest-rc2")
+            n = s.q("MATCH (p:Project) RETURN count(p) AS n")[0]["n"]
+            assert n == 2, "the conservative rule splits; maintain reports, never folds"
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                cmd_maintain(argparse.Namespace(apply=False), s)
+            text = out.getvalue()
+            assert f'merge-project --from "{old}" --into "{new}"' in text, text
+            assert f'--from "{new}"' not in text, "the checkout's current remote is the target"
+            assert s.q("MATCH (p:Project) RETURN count(p) AS n")[0]["n"] == n
+
+
 def _check_graph_format() -> None:
     """An older store is re-keyed once, by a writer, and never again; a
     too-new journal is refused before anything is wiped.
@@ -3951,6 +4045,7 @@ def cmd_selftest(a, s: Store) -> None:
     _check_merge_project()
     _check_merge_replay()
     _check_merged_into_portable()
+    _check_remote_changed()
     _check_graph_format()
     _check_maintain_hints()
     _check_portable_replay()
