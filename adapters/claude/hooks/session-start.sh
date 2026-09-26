@@ -22,8 +22,8 @@ HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 MARK="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.precedent-primed/${PWD//[^A-Za-z0-9-]/_}"
 rm -f "$MARK" 2>/dev/null
 DG=""
-for candidate in "$HERE/../../../scripts/precedent.py" \
-                 "$HERE"/../../scripts/*/precedent.py; do
+for candidate in "$HERE/../skills/precedent/scripts/precedent.py" \
+                 "$HERE"/../../skills/*precedent/scripts/precedent.py; do
   [ -f "$candidate" ] && { DG="$candidate"; break; }
 done
 [ -n "$DG" ] || exit 0

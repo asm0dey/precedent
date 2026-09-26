@@ -108,10 +108,11 @@ manual — Claude Code has no plugin-provided statusline ([docs/setup.md](docs/s
 
 The plugin root is the **repository** root, not `adapters/claude/`. `/plugin install` copies the
 plugin root and nothing above it, so an adapter-rooted plugin would ship the skills and the hook
-without `scripts/precedent.py` — the CLI all of them drive — and the hook fails closed, which
-looks exactly like a quiet session. Rooting at the repository puts the CLI inside the installed
-tree at the path the hook already resolves in a clone. The cost is that skills and the hook are
-no longer where convention looks, so `.claude-plugin/plugin.json` names both paths.
+without the CLI all of them drive (it lives in the `precedent` skill's `scripts/`) — and the hook
+fails closed, which looks exactly like a quiet session. Rooting at the repository puts the CLI
+inside the installed tree at the path the hook already resolves in a clone. The cost is that
+skills and the hook are no longer where convention looks, so `.claude-plugin/plugin.json` names
+both paths.
 
 Both manifests, `plugin.json` and `marketplace.json`, are generated from the ACR manifest below by
 `scripts/gen-plugin-json.py` (`--check` fails CI if they drift, or if a path plugin.json names
@@ -120,8 +121,8 @@ stops existing).
 ### ACR (Codex, Cursor, and Claude Code)
 
 [ACR](https://github.com/jbaruch/agentic-context-registry) is the only channel that reaches Codex
-and Cursor. It is driven by `agent-plugin.yaml`, which ships the ten skills, the CLI script and
-the session-start hook:
+and Cursor. It is driven by `agent-plugin.yaml`, which ships the ten skills, with the CLI inside the
+`precedent` one, and the session-start hook:
 
 ```bash
 acr install github:asm0dey/precedent --agent claude-code   # or codex, or cursor

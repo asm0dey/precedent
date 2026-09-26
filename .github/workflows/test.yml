@@ -46,8 +46,8 @@ jobs:
         # The scratch `--home` is not optional either way: a default-home
         # `selftest` would enumerate every real Project node and shell out
         # to `git` in each one's directory (see identity_gaps() in
-        # scripts/precedent.py).
-        run: uv run scripts/precedent.py --home "${RUNNER_TEMP}/precedent-ci" selftest
+        # the CLI).
+        run: uv run adapters/claude/skills/precedent/scripts/precedent.py --home "${RUNNER_TEMP}/precedent-ci" selftest
       - name: hook finds the CLI in every install layout
         shell: bash
         # The hook fails closed: it exits 0 and prints nothing when it cannot
@@ -64,20 +64,24 @@ jobs:
         # exit-code assertion cannot see it, so this asserts the badge itself.
         run: bash tests/statusline-badge.sh
 
-      - name: windows hook adapter runs clean
+      - name: windows hook adapter finds the CLI
         if: matrix.os == 'windows-latest'
         shell: pwsh
         env:
           PRECEDENT_HOME: ${{ runner.temp }}/precedent-hook-ci
-        # session-start.ps1 resolves the CLI relative to its own path, not an
-        # env var, so it needs no CLAUDE_PLUGIN_ROOT here. PRECEDENT_HOME
-        # points at an empty scratch store, so `brief --only-if-relevant`
-        # finds nothing to say and the script exits 0 having printed
-        # nothing — that silence is the correct, designed behaviour, not a
-        # failure, so this step only asserts the exit code.
+          CLAUDE_CONFIG_DIR: ${{ runner.temp }}/claude-hook-ci
+        # The hook fails closed, so on an empty store "found nothing to say"
+        # and "never found the CLI" both print nothing. Seeding one decision
+        # for this directory makes silence mean only the second.
         run: |
-          & "${{ github.workspace }}/adapters/claude/hooks/session-start.ps1"
+          $cli = "${{ github.workspace }}/adapters/claude/skills/precedent/scripts/precedent.py"
+          & uv run --quiet $cli record --project "${{ github.workspace }}" `
+            --title "ci probe" --scope tooling --topic ci-probe --chose probe `
+            --rejected none --rationale "proves the hook resolves the CLI" | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "seeding the store failed" }
+          $out = (& "${{ github.workspace }}/adapters/claude/hooks/session-start.ps1") -join "`n"
           if ($LASTEXITCODE -ne 0) { throw "session-start.ps1 exited $LASTEXITCODE" }
+          if ($out -notmatch 'PRECEDENT') { throw "session-start.ps1 printed no brief: $out" }
 
       - name: windows statusline adapter runs clean
         if: matrix.os == 'windows-latest'

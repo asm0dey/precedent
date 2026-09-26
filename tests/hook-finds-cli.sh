@@ -8,7 +8,7 @@
 set -euo pipefail
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
-CLI="$ROOT/scripts/precedent.py"
+CLI="$ROOT/adapters/claude/skills/precedent/scripts/precedent.py"
 HOOK="$ROOT/adapters/claude/hooks/session-start.sh"
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
@@ -64,18 +64,15 @@ assert_primes repository "$HOOK"
 # directory names, so the hook cannot assume a fixed sibling — this uses a
 # different package name than the real one on purpose.
 ACR="$WORK/acr-project/.claude"
-mkdir -p "$ACR/hooks/acr__someone__pkg__session-start" \
-         "$ACR/scripts/acr__someone__pkg__precedent-cli" \
-         "$ACR/skills/acr__someone__pkg__precedent" \
-         "$ACR/skills/acr__someone__pkg__precedent-check"
+mkdir -p "$ACR/hooks/acr__someone__pkg__session-start" "$ACR/skills"
 cp "$HOOK" "$ACR/hooks/acr__someone__pkg__session-start/"
-cp "$CLI" "$ACR/scripts/acr__someone__pkg__precedent-cli/"
-cp "$ROOT/adapters/claude/skills/precedent/SKILL.md" \
-   "$ACR/skills/acr__someone__pkg__precedent/"
-# A sibling task skill, so the guidance lookup cannot pass by matching just
-# any skill directory that happens to be there.
-cp "$ROOT/adapters/claude/skills/precedent-check/SKILL.md" \
-   "$ACR/skills/acr__someone__pkg__precedent-check/"
+# The whole skill tree, as `acr realize` writes it: SKILL.md plus scripts/,
+# which is where the CLI and its package now live.
+cp -R "$ROOT/adapters/claude/skills/precedent" "$ACR/skills/acr__someone__pkg__precedent"
+# A sibling task skill, so neither lookup can pass by matching just any skill
+# directory that happens to be there.
+cp -R "$ROOT/adapters/claude/skills/precedent-check" \
+      "$ACR/skills/acr__someone__pkg__precedent-check"
 assert_primes acr-realized \
   "$ACR/hooks/acr__someone__pkg__session-start/session-start.sh"
 

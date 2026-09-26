@@ -5,7 +5,7 @@
 set -euo pipefail
 HOME_DIR="${1:?usage: seed-fixtures.sh <graph-dir> <projects-dir>}"
 P="${2:?usage: seed-fixtures.sh <graph-dir> <projects-dir>}"
-CLI="$(dirname "$0")/../scripts/precedent.py"
+CLI="$(dirname "$0")/../adapters/claude/skills/precedent/scripts/precedent.py"
 d() { uv run --quiet "$CLI" --home "$HOME_DIR" "$@"; }
 r() { local proj="$1"; shift; d record --project "$P/$proj" "$@" >/dev/null; }
 
