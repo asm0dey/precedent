@@ -30,7 +30,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10.0.1  # no floating major tag exists; pin exact
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1; a SHA, since a tag can be moved
       - name: selftest
         shell: bash
         # The value is double-quoted, which is what keeps it safe on
@@ -100,7 +100,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10.0.1  # no floating major tag exists; pin exact
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1; a SHA, since a tag can be moved
       - name: plugin.json and marketplace.json are current
         # Both are projections of agent-plugin.yaml, and the check also
         # asserts the two adapter paths plugin.json names still exist — a

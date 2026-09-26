@@ -77,7 +77,6 @@ def cmd_rebuild(a, s: Store) -> None:
               f"{'y' if len(skipped) == 1 else 'ies'}:")
         for msg in skipped:
             print(f"  {msg}")
-    return
 
 
 def replay_entry(s: Store, e: dict) -> None:

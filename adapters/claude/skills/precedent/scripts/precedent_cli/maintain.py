@@ -271,7 +271,9 @@ def remote_changes(s: "Store") -> list[dict]:
                     continue
                 seen.add(pair)
                 new = next((x for x in (a_, b_) if x["portable"] == current), None)
-                old = (b_ if new is a_ else a_) if new else None
+                old = None
+                if new:
+                    old = b_ if new is a_ else a_
                 out.append({"path": path, "nodes": sorted((a_, b_), key=lambda x: x["id"]),
                             "old": old, "new": new})
     return out

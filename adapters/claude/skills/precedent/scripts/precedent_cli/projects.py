@@ -70,7 +70,9 @@ def git_out(root: pathlib.Path, *args: str) -> str | None:
     """
     import subprocess
     try:
-        r = subprocess.run(["git", "-C", str(root), *args],
+        # cwd, not `-C root`: the directory never becomes an argument git
+        # parses, so no path can be read as an option.
+        r = subprocess.run(["git", *args], cwd=root,
                            capture_output=True, text=True, timeout=5)
     except (OSError, subprocess.SubprocessError):
         return None
