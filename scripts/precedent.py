@@ -539,31 +539,68 @@ def refuse_missing_project(s: "Store", value: str) -> None:
 
 
 def project_info(s: "Store", path: str, extra_tags: str = "") -> dict:
-    """Identify this directory, resolving it onto the node that already holds it.
+    """Identify this directory: where it belongs, and which node to read.
 
-    `id` is the graph key — the native path of first sighting, which may be
-    another machine's. `path` is this machine's, because containment is
-    derived from paths and must be derived from local ones.
+    `key` is where the project belongs: its portable id, else the node
+    already holding its path, else its main-checkout path (docs/adr/0009).
+    `id` is the node to READ — the key's node when it exists, else a node an
+    older key left behind, so `check` and `suggest`, which must not write,
+    still see a project no writer has re-keyed yet. `legacy` lists those
+    older nodes; `settle` folds them.
 
-    This reads and never writes: `check` and `suggest` hold a shared lock,
-    which cannot be promoted. The portable id is written onto the node by
-    `upsert_project`, on the commands that already take the write lock.
+    `contents` comes from the directory actually open, not the main
+    checkout, so the listing matches what is on disk here. The name is the
+    stored one when the project exists: a worktree reads as its project.
+
+    Reads only.
     """
     refuse_missing_project(s, path)
-    info = detect_project(pathlib.Path(path))
-    info["path"] = info["id"]
-    info["portable"] = portable_id(pathlib.Path(info["path"]))
-    if info["portable"]:
-        # ORDER BY for the same reason as upsert_project's lookup, and the
-        # same one, so a read and the write beside it agree on which node.
-        rows = s.q("""MATCH (p:Project {portable:$pp})
-                      RETURN p.id AS id, p.paths AS paths ORDER BY p.id LIMIT 1""",
-                   {"pp": info["portable"]})
-        if rows:
-            info["id"], info["paths"] = rows[0]["id"], paths_of(rows[0])
-    info.setdefault("paths", [info["path"]])
+    here = pathlib.Path(path)
+    info = detect_project(here)
+    ident = identity_path(here)
+    info["path"], info["name"] = str(ident), ident.name
+    info["portable"] = portable_id(here)
+    info["key"] = info["portable"] or path_holder(s, info["path"]) or info["path"]
+    info["legacy"] = legacy_keys(s, info["key"], info["portable"],
+                                 sorted({info["path"], str(here.resolve())}))
+    read = lambda pid: s.q("""MATCH (p:Project {id:$id})
+                              RETURN p.id AS id, p.name AS name, p.paths AS paths""",
+                           {"id": pid})
+    row = read(info["key"]) or (read(info["legacy"][0]) if info["legacy"] else [])
+    if row:
+        info["id"], info["paths"] = row[0]["id"], paths_of(row[0])
+        info["name"] = row[0]["name"] or info["name"]
+    else:
+        info["id"], info["paths"] = info["key"], [info["path"]]
     info["tags"] = sorted(set(tags_of(s, info["id"])) | set(csv(extra_tags)))
     return info
+
+
+def settle(s: Store, info: dict) -> None:
+    """Fold every older node this project left behind into its key.
+
+    The lazy re-key: called by the commands that write — `record`, `tag`,
+    `brief`, `merge-project` — never by readers. Each fold is journalled
+    first, because a worktree keyed on its own path cannot be re-folded from
+    journal data alone. `brief` still never creates a node from nothing:
+    with no older node there is nothing to fold, and folding one is a rename.
+    This subsumes the old standalone portable-id backfill: a project that
+    gained a remote is exactly a portable-less node on one of our paths.
+    """
+    if not info["legacy"]:
+        return
+    for old in info["legacy"]:
+        s.log("project_merge", {"from": old, "into": info["key"],
+                                "portable": info["portable"]})
+        fold_project(s, old, info["key"])
+    if info["portable"]:
+        s.q("MATCH (p:Project {id:$id}) SET p.portable=$pp",
+            {"id": info["key"], "pp": info["portable"]})
+    row = s.q("MATCH (p:Project {id:$id}) RETURN p.name AS name, p.paths AS paths",
+              {"id": info["key"]})[0]
+    info["id"], info["legacy"] = info["key"], []
+    info["name"], info["paths"] = row["name"] or info["name"], paths_of(row)
+    info["tags"] = sorted(set(info["tags"]) | set(tags_of(s, info["id"])))
 
 
 def vocabulary(s: "Store") -> list[dict]:
@@ -882,6 +919,7 @@ def write_decision(s: Store, d: dict) -> str:
 
 def cmd_record(a, s: Store) -> None:
     info = project_info(s, a.project)
+    settle(s, info)
     d = {
         "id": a.id or f"{slug(a.title)}-{int(time.time())}",
         "title": a.title,
@@ -1095,43 +1133,12 @@ def worth_backfilling(s: "Store", info: dict) -> bool:
     return s.q("MATCH (d:Decision) RETURN count(d) AS n")[0]["n"] > 0
 
 
-def backfill_portable(s: Store, info: dict) -> None:
-    """Fill in a portable id that did not exist when the project was first
-    recorded — a repo that gains a remote later would otherwise stay split
-    forever. Called from `brief`, on every session start, which is the
-    cheapest place to catch this.
-
-    Writes to an EXISTING node only (`MATCH ... SET`, never `MERGE`): `brief`
-    must never create one, or a SessionStart hook would litter the graph with
-    an empty project for every directory anyone ever opens. The guard only
-    fires when the node's own `portable` reads back exactly `[{"pp": None}]`
-    — a node that is there but has never had one set; a nonexistent node
-    reads back `[]` and the guard is false there too, so this never even
-    reaches a MATCH that could theoretically race a create.
-
-    Journalled BEFORE the mutation (`Store.log`'s own rule), because the
-    graph is not the durable copy: `rebuild` replays the journal into a fresh
-    graph, and a mutation with no journal entry is invisible to it — the
-    backfill would be silently undone by the next rebuild, and a second
-    machine resolving this project's portable id would then miss the lookup
-    and fork a second node, reopening exactly the split Task 13 closed.
-    """
-    if not info["portable"]:
-        return
-    if s.q("MATCH (p:Project {id:$id}) RETURN p.portable AS pp",
-           {"id": info["id"]}) != [{"pp": None}]:
-        return
-    s.log("project_portable", {"project_id": info["id"], "portable": info["portable"]})
-    s.q("MATCH (p:Project {id:$id}) SET p.portable=$pp",
-        {"id": info["id"], "pp": info["portable"]})
-
-
 def cmd_brief(a, s: Store) -> None:
-    # Writes to an existing Project node only, to backfill a portable id. Never
-    # creates one: a SessionStart hook calls this in every directory the user
-    # opens, and creating would litter the graph with empty projects.
+    # Writes only to fold an older key into this project's (settle). Never
+    # creates a node: a SessionStart hook calls this in every directory the
+    # user opens, and creating would litter the graph with empty projects.
     info = project_info(s, a.project)
-    backfill_portable(s, info)
+    settle(s, info)
 
     # WHERE goes with the MATCH it filters, BEFORE the OPTIONAL MATCH. After
     # it, openCypher binds it to the optional pattern, which filters nothing:
@@ -1470,6 +1477,7 @@ def cmd_tag(a, s: Store) -> None:
         print("add some with: precedent.py tag --project . --add backend,java,distributed")
         return
 
+    settle(s, info)
     upsert_project(s, info)
     if add:
         # Journalled like a record: without the identity here, a rebuild that
@@ -1557,10 +1565,10 @@ def identity_gaps(s: "Store") -> list[dict]:
 
     A project recorded before portable ids existed never acquires one once a
     second machine has claimed its remote: `project_info` resolves onto the
-    node carrying the portable, so `backfill_portable` reads back a non-None
-    value and returns without writing. The older node keeps its decisions,
-    never gains an identity, and every later write lands on the newer one.
-    Nothing heals that and nothing else reports it — so this does.
+    node carrying the portable, so nothing stamps it. The older node keeps
+    its decisions, never gains an identity, and every later write lands on
+    the newer one. Nothing heals that and nothing else reports it — so this
+    does.
 
     Reports, never merges. Two decision histories are one repo's or two
     repos', and telling them apart is a judgment; merging them silently is the
@@ -1801,6 +1809,13 @@ def replay_entry(s: Store, e: dict) -> None:
             fold_project(s, e["project_id"], e["portable"])
             s.q("MATCH (p:Project {id:$id}) SET p.portable=$pp",
                 {"id": e["portable"], "pp": e["portable"]})
+    elif e["op"] == "project_merge":
+        # A missing source is a no-op: upsert_project's own fold on replay may
+        # already have absorbed it.
+        fold_project(s, e["from"], e["into"])
+        if e.get("portable"):
+            s.q("MATCH (p:Project {id:$id}) SET p.portable=$pp",
+                {"id": e["into"], "pp": e["portable"]})
     elif e["op"] == "regret":
         apply_regret(s, e)
     elif e["op"] == "amend":
@@ -2615,7 +2630,7 @@ def _check_lock_modes() -> None:
         "record": True, "tag": True, "regret": True, "principle": True,
         "rebuild": True, "selftest": True,
         "amend": True,          # rewords a decision in place
-        "brief": True,          # the portable-id backfill mutates
+        "brief": True,          # settle() folds older keys
         "cypher": True,         # arbitrary query text; CREATE is unknowable up front
         "init": True,           # returns before any Store is opened
     }
@@ -3150,8 +3165,8 @@ def _check_identity_gaps(s: Store) -> None:
             upsert_project(s, {"id": holder, "path": holder, "name": "gap",
                                "portable": pp})
             # …and this machine's older node for the same repo, recorded before
-            # portable ids existed. brief cannot heal it: project_info resolves
-            # onto the holder, so backfill_portable sees a non-None portable.
+            # portable ids existed. project_info resolves onto the holder, so
+            # nothing stamps it.
             upsert_project(s, {"id": str(split), "path": str(split),
                                "name": "gap", "portable": None})
             upsert_project(s, {"id": str(bare), "path": str(bare),
@@ -3265,6 +3280,87 @@ def _check_rekey(s: Store) -> None:
         wipe()
 
 
+def _check_settle() -> None:
+    """Lazy re-key: readers still find a node no writer has re-keyed; the
+    next writer folds it, journalled, so `rebuild` lands in the same place.
+
+    Throwaway Store: settle() journals.
+    """
+    import argparse
+    import contextlib
+    import io
+    import tempfile
+
+    pp = "github.com/asm0dey/selftest-st"
+    with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as tmp_home:
+        base = pathlib.Path(tmp).resolve()
+        with Store(pathlib.Path(tmp_home), write=True) as s:
+            in_project = lambda did: s.q(
+                "MATCH (:Decision {id:$d})-[:IN_PROJECT]->(p:Project) RETURN p.id AS id",
+                {"d": did})
+
+            # 1. The 0.4.x shape in a repo with a remote.
+            R = base / "remote-repo"
+            _git_repo(R, "git@github.com:asm0dey/selftest-st.git")
+            s.q("CREATE (:Project {id:$id, name:'remote-repo', portable:$pp, paths:$id})",
+                {"id": str(R), "pp": pp})
+            s.q("CREATE (:Decision {id:'selftest-st1', status:'active'})")
+            s.q("""MATCH (d:Decision {id:'selftest-st1'}), (p:Project {id:$id})
+                   MERGE (d)-[:IN_PROJECT]->(p)""", {"id": str(R)})
+            info = project_info(s, str(R))
+            assert info["key"] == pp and info["id"] == str(R), \
+                f"a reader must see the node no writer has re-keyed yet: {info}"
+            settle(s, info)
+            assert info["id"] == pp and info["legacy"] == []
+            assert in_project("selftest-st1") == [{"id": pp}]
+            last = json.loads(s.journal.read_text(encoding="utf-8").splitlines()[-1])
+            assert (last["op"], last["from"], last["into"], last["v"]) \
+                == ("project_merge", str(R), pp, 1), last
+
+            # 2. brief never creates a node from nothing.
+            E = base / "empty-repo"
+            _git_repo(E, "git@github.com:asm0dey/selftest-st-empty.git")
+            n = s.q("MATCH (p:Project) RETURN count(p) AS n")[0]["n"]
+            settle(s, project_info(s, str(E)))
+            assert s.q("MATCH (p:Project) RETURN count(p) AS n")[0]["n"] == n
+
+            # 3. A remote-less worktree that 0.4.x keyed on its own path.
+            M, W = base / "main", base / "wt"
+            _git_repo(M)
+            _git(M, "worktree", "add", "-q", str(W))
+            d = {"id": "selftest-st3", "title": "t", "statement": "t", "rationale": "",
+                 "scope": "tooling", "created": today(), "project_id": str(W),
+                 "project_name": "wt", "project_path": str(W), "portable": None,
+                 "tags": [], "topics": [], "chose": [], "rejected": [], "supersedes": []}
+            s.log("record", d)
+            write_decision(s, d)
+            info = project_info(s, str(W))
+            assert info["key"] == str(M) and info["legacy"] == [str(W)], info
+            settle(s, info)
+            assert in_project("selftest-st3") == [{"id": str(M)}]
+            # Only the journalled fold can reproduce this on rebuild.
+            replay_journal(s)
+            assert in_project("selftest-st3") == [{"id": str(M)}], \
+                "rebuild must land the worktree's decisions on the main checkout"
+            assert s.q("MATCH (p:Project {id:$id}) RETURN p.id AS id", {"id": str(W)}) == []
+
+            # 4. The header names the project, not the worktree directory.
+            s.q("MATCH (p:Project {id:$id}) SET p.name='main'", {"id": str(M)})
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                cmd_brief(argparse.Namespace(project=str(W), min_shared=1,
+                                             only_if_relevant=False), s)
+            assert "project: main" in out.getvalue(), out.getvalue()
+
+            # 5. A worktree of a repo WITH a remote: portable key, main-checkout path.
+            M2, W2 = base / "main2", base / "wt2"
+            _git_repo(M2, "git@github.com:asm0dey/selftest-st2.git")
+            _git(M2, "worktree", "add", "-q", str(W2))
+            info = project_info(s, str(W2))
+            assert info["key"] == "github.com/asm0dey/selftest-st2", info
+            assert info["path"] == str(M2) and info["name"] == "main2", info
+
+
 def _check_portable_replay() -> None:
     """0.4.x `brief` journalled `project_portable` when a project gained a
     remote. Replayed now, it folds the node it names into the portable key —
@@ -3357,6 +3453,7 @@ def cmd_selftest(a, s: Store) -> None:
     _check_identity(s)
     _check_identity_gaps(s)
     _check_rekey(s)
+    _check_settle()
     _check_portable_replay()
     after = s.q("MATCH (n) RETURN count(n) AS n")[0]["n"]
     assert after == before, f"selftest changed node count {before} -> {after}"
