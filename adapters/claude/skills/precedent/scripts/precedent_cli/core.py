@@ -153,7 +153,14 @@ class Store:
         # stored, zero errors. `_check_concurrent_writers` re-measures it in
         # CI on every OS this ships to, because the guarantee is the engine's
         # and not this file's to assert.
-        import graphdblite
+        try:
+            import graphdblite
+        except ImportError:
+            raise SystemExit(
+                "error: the graph engine, graphdblite, is not installed for this Python.\n"
+                f"  with uv:    uv run {CLI} ...   (fetches it for you)\n"
+                "  without uv: python -m pip install graphdblite   (in a venv; README, 'Without uv')"
+            ) from None
 
         self._migrate_grafeo_store()
         try:

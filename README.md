@@ -85,14 +85,42 @@ slash commands in Claude Code and Cursor, `$`-prefixed in Codex.
 ## Install
 
 Requires [`uv`](https://docs.astral.sh/uv/) and Python 3.12+, and Claude Code, Codex or Cursor.
-Linux, macOS or Windows. The CLI itself has no install step: it is a PEP 723 single file, and
-`uv` fetches what it needs on first run, then reuses a cached environment. (A persistent
-virtualenv was measured and rejected. It saves 11 ms per call, both paths being dominated by the
-engine import, and costs an install step plus an environment to keep in sync.) What differs by
-agent is how the skills and the hook get in front of it.
+Linux, macOS or Windows. The CLI itself has no install step: it is a PEP 723 script with its
+package beside it, and `uv` fetches what it needs on first run, then reuses a cached
+environment. (A persistent virtualenv was measured and rejected. It saves 11 ms per call, both
+paths being dominated by the engine import, and costs an install step plus an environment to
+keep in sync.) What differs by agent is how the skills and the hook get in front of it.
 
 Claude Code can take either channel below; Codex and Cursor only ACR. Pick one per machine —
 both channels install the same SessionStart hook, and two of them prime every session twice.
+
+### Without uv
+
+The CLI is plain Python 3.12+ with one dependency, `graphdblite`. `<cli>` below is
+`adapters/claude/skills/precedent/scripts/precedent.py` in a clone, or the path the session
+brief prints. Run it as a file, from any directory; do not copy `precedent.py` away from the
+`precedent_cli/` directory next to it.
+
+**pipx** (1.4 or later) reads the same inline metadata uv does:
+
+```bash
+pipx run <cli> brief --project .
+```
+
+**A virtualenv and pip:**
+
+```bash
+python3 -m venv ~/.local/share/precedent/venv
+~/.local/share/precedent/venv/bin/python -m pip install graphdblite
+~/.local/share/precedent/venv/bin/python <cli> brief --project .
+```
+
+On Windows the interpreter is `...\venv\Scripts\python.exe`. Installing into the system Python
+(`pip install graphdblite` with no venv) also works where your distribution allows it; many
+refuse with `externally-managed-environment` (PEP 668), which is why the venv is the example.
+
+The skills and the session-start hook call `uv run`. Without uv the hook stays silent, so
+tell the agent which interpreter to use, or run the commands yourself.
 
 ### Claude Code plugin
 

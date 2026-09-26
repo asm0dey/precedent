@@ -601,3 +601,24 @@ def _check_entry_point() -> None:
                                env={**os.environ, "PYTHONUTF8": "1"})
             assert r.returncode == 0, f"{target} failed from {tmp}: {r.stderr}"
             assert str(CLI) in r.stdout, f"{target} must name the entry script {CLI}"
+
+
+def _check_missing_engine() -> None:
+    """Without graphdblite, a store command says how to install it.
+
+    The README invites plain-python users; their first run is the one most
+    likely to lack the engine, and a ModuleNotFoundError traceback does not
+    say which package, or that uv would have fetched it.
+    """
+    import tempfile
+
+    probe = ("import sys; sys.path.insert(0, sys.argv[1]); sys.modules['graphdblite'] = None\n"
+             "from precedent_cli.cli import main\n"
+             "sys.exit(main(['--home', sys.argv[2], 'check', '--topic', 't']))\n")
+    with tempfile.TemporaryDirectory() as tmp:
+        r = subprocess.run([sys.executable, "-c", probe, str(CLI.parent), tmp],
+                           capture_output=True, text=True, encoding="utf-8",
+                           env={**os.environ, "PYTHONUTF8": "1"})
+    assert r.returncode != 0, "a store command must fail without the engine"
+    assert "pip install graphdblite" in r.stderr, r.stderr
+    assert "Traceback" not in r.stderr, r.stderr

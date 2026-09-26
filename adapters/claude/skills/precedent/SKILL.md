@@ -27,7 +27,9 @@ uv run <skill>/scripts/precedent.py <command> [flags]
 The session brief prints the resolved path — prefer that over recomputing it.
 
 `uv` fetches the dependency on first run — there is no install step. If `uv` is
-missing, `pip install graphdblite` and run with `python`.
+missing, run it with a Python 3.12+ that has `graphdblite` (a venv:
+`python -m pip install graphdblite`), or `pipx run` — the README's "Without uv"
+lists both. Keep the script beside its `precedent_cli/` directory.
 
 ## The task skills beside this one
 
