@@ -631,6 +631,19 @@ def project_info(s: "Store", path: str, extra_tags: str = "") -> dict:
     return info
 
 
+def merge_target(info: dict) -> dict:
+    """What a `project_merge` line records about the node it folds into.
+
+    `from` and `into` alone are not enough to rebuild the target: when the
+    fold is what created it (merge-project into a directory with no node, or
+    a re-key whose key did not exist yet), replay would make it a rename of
+    the source — the source's paths only, no portable id. With these fields
+    replay upserts the target exactly as the writer did, then folds.
+    """
+    return {"portable": info.get("portable"), "project_path": info["path"],
+            "name": info["name"]}
+
+
 def settle(s: Store, info: dict) -> None:
     """Fold every older node this project left behind into its key.
 
@@ -645,16 +658,24 @@ def settle(s: Store, info: dict) -> None:
     if not info["legacy"]:
         return
     for old in info["legacy"]:
-        s.log("project_merge", {"from": old, "into": info["key"],
-                                "portable": info["portable"]})
+        s.log("project_merge", {"from": old, "into": info["key"], **merge_target(info)})
         fold_project(s, old, info["key"])
     if info["portable"]:
         s.q("MATCH (p:Project {id:$id}) SET p.portable=$pp",
             {"id": info["key"], "pp": info["portable"]})
     row = s.q("MATCH (p:Project {id:$id}) RETURN p.name AS name, p.paths AS paths",
               {"id": info["key"]})[0]
+    # The live path joins too — a SET on the node the folds just produced,
+    # never a node from nothing. Without it a fold from a worktree leaves the
+    # key holding only the worktree's path, and once that is removed
+    # `maintain` reports the main checkout's own project as gone.
+    paths = paths_of(row)
+    if info["path"] not in paths:
+        paths = sorted(paths + [info["path"]])
+        s.q("MATCH (p:Project {id:$id}) SET p.paths=$paths",
+            {"id": info["key"], "paths": "\n".join(paths)})
     info["id"], info["legacy"] = info["key"], []
-    info["name"], info["paths"] = row["name"] or info["name"], paths_of(row)
+    info["name"], info["paths"] = row["name"] or info["name"], paths
     info["tags"] = sorted(set(info["tags"]) | set(tags_of(s, info["id"])))
 
 
@@ -1597,6 +1618,11 @@ def cmd_merge_project(a, s: Store) -> None:
         raise SystemExit(2)
     if exists(a.into):
         into = a.into
+        # An existing node has no local path to speak for; its portable id
+        # and name are all the line needs, and replay finds the node itself.
+        row = s.q("MATCH (p:Project {id:$id}) RETURN p.portable AS pp, p.name AS name",
+                  {"id": into})[0]
+        target = {"portable": row["pp"], "name": row["name"]}
     else:
         info = project_info(s, a.into)            # exits 2 unless a directory
         if a.frm in info["legacy"]:
@@ -1608,10 +1634,11 @@ def cmd_merge_project(a, s: Store) -> None:
         else:
             settle(s, info)
             into = upsert_project(s, info)["id"]
+        target = merge_target(info)
     if into == a.frm:
         print(f"{a.frm!r} and {a.into!r} are the same project.", file=sys.stderr)
         raise SystemExit(2)
-    s.log("project_merge", {"from": a.frm, "into": into})
+    s.log("project_merge", {"from": a.frm, "into": into, **target})
     moved = fold_project(s, a.frm, into)
     print(f"merged {a.frm} into {into} — {moved} decision(s) moved")
     for r in contradictions_in(s, into):
@@ -1949,7 +1976,15 @@ def replay_entry(s: Store, e: dict) -> None:
                 {"id": e["portable"], "pp": e["portable"]})
     elif e["op"] == "project_merge":
         # A missing source is a no-op: upsert_project's own fold on replay may
-        # already have absorbed it.
+        # already have absorbed it. Otherwise the target is upserted from the
+        # identity the line carries BEFORE the fold, as the writer did — else
+        # a target the merge created comes back as a rename of the source.
+        # Lines written before these fields existed fold exactly as before.
+        src = s.q("MATCH (p:Project {id:$id}) RETURN p.id AS id", {"id": e["from"]})
+        if src and e.get("project_path"):
+            upsert_project(s, {"id": e["into"], "path": e["project_path"],
+                               "name": e.get("name") or e["into"],
+                               "portable": e.get("portable")})
         fold_project(s, e["from"], e["into"])
         if e.get("portable"):
             s.q("MATCH (p:Project {id:$id}) SET p.portable=$pp",
@@ -3477,10 +3512,16 @@ def _check_settle() -> None:
             assert info["key"] == str(M) and info["legacy"] == [str(W)], info
             settle(s, info)
             assert in_project("selftest-st3") == [{"id": str(M)}]
+            m_paths = lambda: paths_of(s.q("MATCH (p:Project {id:$id}) RETURN p.paths AS paths",
+                                           {"id": str(M)})[0])
+            # Without the live path, removing the worktree leaves the main
+            # checkout's own node reported as gone by `maintain`.
+            assert str(M) in m_paths(), m_paths()
             # Only the journalled fold can reproduce this on rebuild.
             replay_journal(s)
             assert in_project("selftest-st3") == [{"id": str(M)}], \
                 "rebuild must land the worktree's decisions on the main checkout"
+            assert str(M) in m_paths(), f"rebuild must keep the live path: {m_paths()}"
             assert s.q("MATCH (p:Project {id:$id}) RETURN p.id AS id", {"id": str(W)}) == []
 
             # 4. The header names the project, not the worktree directory.
@@ -3575,6 +3616,57 @@ def _check_merge_project() -> None:
             replay_entry(s, {"op": "project_merge", "from": "selftest-nope", "into": str(real)})
             assert s.q("MATCH (p:Project) RETURN count(p) AS n")[0]["n"] == n, \
                 "replaying a merge whose source is gone is a no-op"
+
+
+def _check_merge_replay() -> None:
+    """A merge into a directory that had no node survives `rebuild`.
+
+    merge-project creates that node on the spot. If the journal line named
+    only `from` and `into`, replay made the target a rename of the ghost: the
+    ghost's dead path only, no portable id — `maintain` then called the
+    repaired project gone and 0.4.x could not find it by its remote.
+
+    Throwaway Store: merge-project journals.
+    """
+    import argparse
+    import contextlib
+    import io
+    import tempfile
+
+    pp = "github.com/asm0dey/selftest-mr"
+    with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as tmp_home:
+        base = pathlib.Path(tmp).resolve()
+        plain, repo = base / "plain", base / "repo"
+        plain.mkdir()
+        _git_repo(repo, "git@github.com:asm0dey/selftest-mr.git")
+        with Store(pathlib.Path(tmp_home), write=True) as s:
+            for did, into in (("selftest-mr1", plain), ("selftest-mr2", repo)):
+                ghost = os.path.join(os.sep + "nonexistent-precedent-selftest", did)
+                d = {"id": did, "title": "t", "statement": "t", "rationale": "",
+                     "scope": "tooling", "created": today(), "project_id": ghost,
+                     "project_name": into.name, "project_path": ghost, "portable": None,
+                     "tags": [], "topics": [], "chose": [], "rejected": [], "supersedes": []}
+                s.log("record", d)
+                write_decision(s, d)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    cmd_merge_project(argparse.Namespace(frm=ghost, into=str(into)), s)
+
+            def check(when: str) -> None:
+                node = lambda pid: s.q("""MATCH (p:Project {id:$id})
+                                          RETURN p.paths AS paths, p.portable AS pp""",
+                                       {"id": pid})
+                on = lambda did: s.q("""MATCH (:Decision {id:$d})-[:IN_PROJECT]->(p:Project)
+                                        RETURN p.id AS id""", {"d": did})
+                assert str(plain) in paths_of(node(str(plain))[0]), f"{when}: {node(str(plain))}"
+                assert on("selftest-mr1") == [{"id": str(plain)}], when
+                got = node(pp)
+                assert got and got[0]["pp"] == pp and str(repo) in paths_of(got[0]), \
+                    f"{when}: {got}"
+                assert on("selftest-mr2") == [{"id": pp}], when
+
+            check("after merge")
+            replay_journal(s)
+            check("after rebuild")
 
 
 def _check_graph_format() -> None:
@@ -3809,6 +3901,7 @@ def cmd_selftest(a, s: Store) -> None:
     _check_rekey(s)
     _check_settle()
     _check_merge_project()
+    _check_merge_replay()
     _check_graph_format()
     _check_maintain_hints()
     _check_portable_replay()
