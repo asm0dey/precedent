@@ -396,6 +396,61 @@ def normalise_remote(url: str) -> str | None:
     return url.lower() or None
 
 
+def git_out(root: pathlib.Path, *args: str) -> str | None:
+    """stdout of one git command run in `root`; None if git is missing, slow or fails.
+
+    None is a fine answer everywhere this is used: no remote, no worktree
+    mapping. A guessed answer is not — it merges two projects' histories.
+    """
+    import subprocess
+    try:
+        r = subprocess.run(["git", "-C", str(root), *args],
+                           capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
+def remote_url(root: pathlib.Path) -> str:
+    """origin, else the only remote there is, else nothing.
+
+    Several remotes and no origin is not guessed at: picking one is how a
+    fork and its upstream would end up sharing one identity.
+    """
+    url = git_out(root, "remote", "get-url", "origin")
+    if url:
+        return url
+    names = (git_out(root, "remote") or "").split()
+    return (git_out(root, "remote", "get-url", names[0]) or "") if len(names) == 1 else ""
+
+
+def identity_path(root: pathlib.Path) -> pathlib.Path:
+    """This directory as its main checkout sees it.
+
+    A linked worktree is the same project as the checkout it was added from.
+    A repo with a remote gets that through the portable id; one without would
+    key a second project on the worktree's own path. Only a linked worktree
+    is mapped — its git dir differs from the common dir — so a submodule,
+    whose common dir is `.git/modules/<name>`, keeps its own path.
+
+    ponytail: a worktree of a submodule maps onto .git/modules/<name>. Still
+    one stable key per project, just not a pretty one.
+    """
+    root = root.resolve()
+    top = git_out(root, "rev-parse", "--show-toplevel")
+    git_dir = git_out(root, "rev-parse", "--path-format=absolute", "--git-dir")
+    common = git_out(root, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    if not (top and git_dir and common):
+        return root
+    common_p = pathlib.Path(common).resolve()
+    if pathlib.Path(git_dir).resolve() == common_p:
+        return root
+    main = common_p.parent if common_p.name == ".git" else common_p
+    if not main.is_dir():
+        return root
+    return main / root.relative_to(pathlib.Path(top).resolve())
+
+
 def portable_id(root: pathlib.Path) -> str | None:
     """The identity that survives a machine, a clone location and an OS.
 
@@ -403,20 +458,10 @@ def portable_id(root: pathlib.Path) -> str | None:
     machine-local. A guessed id is not: it silently merges the histories of
     two unrelated projects, which is the failure a wrong tag causes.
     """
-    import subprocess
-
-    def git(*args: str) -> str | None:
-        try:
-            r = subprocess.run(["git", "-C", str(root), *args],
-                               capture_output=True, text=True, timeout=5)
-        except (OSError, subprocess.SubprocessError):
-            return None
-        return r.stdout.strip() if r.returncode == 0 else None
-
-    remote = normalise_remote(git("remote", "get-url", "origin") or "")
+    remote = normalise_remote(remote_url(root))
     if not remote:
         return None
-    top = git("rev-parse", "--show-toplevel")
+    top = git_out(root, "rev-parse", "--show-toplevel")
     if not top:
         return remote
     try:
@@ -1876,6 +1921,74 @@ def _check_detect_project() -> None:
         assert "node_modules" not in detect_project(tmp)["contents"]
 
 
+def _git(root: pathlib.Path, *args: str) -> None:
+    import subprocess
+    subprocess.run(["git", "-C", str(root), *args], capture_output=True, check=True)
+
+
+def _git_repo(root: pathlib.Path, remote: str | None = None) -> None:
+    """A repo at `root` with one commit — `git worktree add` needs a HEAD.
+
+    Identity and signing come from `-c` so the check runs on any machine,
+    including one that signs every commit.
+    """
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "README").write_text("selftest")
+    _git(root, "init", "-q")
+    _git(root, "add", ".")
+    _git(root, "-c", "user.name=selftest", "-c", "user.email=selftest@example.invalid",
+         "-c", "commit.gpgsign=false", "commit", "-q", "-m", "init")
+    if remote:
+        _git(root, "remote", "add", "origin", remote)
+
+
+def _check_worktrees() -> None:
+    """A worktree is its main checkout; a submodule is not.
+
+    Only a repo with a remote got this for free, through the portable id.
+    Without one, the worktree's own path keyed a second project — issue #13.
+    """
+    import shutil
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        base = pathlib.Path(tmp).resolve()
+        main, wt = base / "main", base / "wt"
+        (main / "mod").mkdir(parents=True)
+        (main / "mod" / "f").write_text("x")
+        _git_repo(main)
+        _git(main, "worktree", "add", "-q", str(wt))
+
+        assert identity_path(main) == main
+        assert identity_path(main / "mod") == main / "mod"
+        assert identity_path(wt) == main, "a remote-less worktree is its main checkout"
+        assert identity_path(wt / "mod") == main / "mod", "its subdirectories map with it"
+        assert portable_id(wt) is None
+
+        _git(main, "remote", "add", "upstream", "git@github.com:asm0dey/selftest-wt.git")
+        assert portable_id(main) == "github.com/asm0dey/selftest-wt", \
+            "the only remote counts, whatever it is called"
+        assert portable_id(wt / "mod") == "github.com/asm0dey/selftest-wt#/mod"
+        _git(main, "remote", "add", "fork", "git@github.com:someone/selftest-wt.git")
+        assert portable_id(main) is None, "two remotes and no origin is not guessed at"
+        _git(main, "remote", "add", "origin", "git@github.com:asm0dey/selftest-wt.git")
+        assert portable_id(main) == "github.com/asm0dey/selftest-wt"
+
+        # A submodule's common dir is <super>/.git/modules/<name>, and it is
+        # not a linked worktree: it keeps its own path.
+        src = base / "subsrc"
+        _git_repo(src)
+        # as_uri(): a file:// URL is accepted by git on every OS; a bare
+        # Windows path with backslashes is not reliably.
+        _git(main, "-c", "protocol.file.allow=always", "submodule", "add", "-q",
+             src.as_uri(), "vendored")
+        assert identity_path(main / "vendored") == main / "vendored", \
+            "a submodule must not be mapped onto .git/modules"
+
+        # The main checkout moved away: git cannot answer, so no mapping.
+        shutil.move(str(main), str(base / "moved"))
+        assert identity_path(wt) == wt, "a worktree whose main checkout is gone keys itself"
+
+
 def _check_drift() -> None:
     """Identity after trivial normalisation is a fact. Similarity is a
     judgment, and it moved to the model — difflib scored a shared prefix
@@ -3065,6 +3178,7 @@ def cmd_selftest(a, s: Store) -> None:
     _check_standing_orders()
     _check_helpers()
     _check_detect_project()
+    _check_worktrees()
     _check_drift()
     _check_projects(s)
     _check_decisions(s)
