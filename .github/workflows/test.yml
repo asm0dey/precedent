@@ -46,7 +46,7 @@ jobs:
         # The scratch `--home` is not optional either way: a default-home
         # `selftest` would enumerate every real Project node and shell out
         # to `git` in each one's directory (see identity_gaps() in
-        # the CLI).
+        # precedent_cli/maintain.py).
         run: uv run adapters/claude/skills/precedent/scripts/precedent.py --home "${RUNNER_TEMP}/precedent-ci" selftest
       - name: hook finds the CLI in every install layout
         shell: bash
