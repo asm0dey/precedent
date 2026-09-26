@@ -448,7 +448,10 @@ def identity_path(root: pathlib.Path) -> pathlib.Path:
     main = common_p.parent if common_p.name == ".git" else common_p
     if not main.is_dir():
         return root
-    return main / root.relative_to(pathlib.Path(top).resolve())
+    try:
+        return main / root.relative_to(pathlib.Path(top).resolve())
+    except ValueError:
+        return root
 
 
 def portable_id(root: pathlib.Path) -> str | None:
