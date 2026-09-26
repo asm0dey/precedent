@@ -712,24 +712,44 @@ def normalised(tag: str) -> str:
     return flat[:-1] if len(flat) > 3 and flat.endswith("s") else flat
 
 
+def path_holder(s: Store, path: str) -> str | None:
+    """The portable-less node already holding `path`: its id, or None.
+
+    Without a remote a path has no identity of its own to fold anything
+    into — it belongs to whichever node already holds it (after a merge,
+    a node keyed on another path). An exact id match wins over a node that
+    merely lists the path, so an unmerged project always resolves to itself.
+    """
+    rows = s.q("""MATCH (p:Project) WHERE p.portable IS NULL
+                  RETURN p.id AS id, p.paths AS paths""")
+    hits = sorted(r["id"] for r in rows if path in (paths_of(r) or [r["id"]]))
+    return path if path in hits else (hits[0] if hits else None)
+
+
 def legacy_keys(s: Store, key: str, portable: str | None,
                 local_paths: list[str]) -> list[str]:
     """Nodes holding this project under a key other than `key`.
 
-    Two shapes, both left by history: a node carrying this exact portable id
-    under a path key (every node before docs/adr/0009, and what 0.4.x still
-    creates), and a node with no portable id whose paths include one of ours
-    (a repo that has since gained a remote, or a worktree keyed on its own
-    path). A node with a DIFFERENT portable is never matched by path: its
-    remote says it is another project, and a wrong merge is worse than a
-    visible split.
+    With a remote: a node carrying this exact portable id under a path key
+    (every node before docs/adr/0009, and what 0.4.x still creates), or a
+    portable-less node whose paths include one of ours (a repo that has
+    since gained a remote) — that fold is by path because the portable side
+    has nothing yet to match on. A node with a DIFFERENT portable is never
+    matched by path: its remote says it is another project, and a wrong
+    merge is worse than a visible split.
+
+    Without a remote: only a node keyed on one of our own paths (a worktree
+    keyed on its own path) folds — a node that merely LISTS our path already
+    owns it (see `path_holder`), so matching on membership here would drag
+    that node back under whichever path last wrote, undoing an earlier merge.
     """
     rows = s.q("""MATCH (p:Project) WHERE p.id <> $key
                   RETURN p.id AS id, p.portable AS pp, p.paths AS paths""", {"key": key})
     mine = set(local_paths)
     return sorted(r["id"] for r in rows
-                  if (portable and r["pp"] == portable)
-                  or (r["pp"] is None and mine & set(paths_of(r) or [r["id"]])))
+                  if (portable and (r["pp"] == portable
+                                    or (r["pp"] is None and mine & set(paths_of(r) or [r["id"]]))))
+                  or (not portable and r["pp"] is None and r["id"] in mine))
 
 
 def fold_project(s: Store, frm: str, into: str) -> int:
@@ -778,7 +798,7 @@ def upsert_project(s: Store, info: dict) -> dict:
     under another directory name must not rename the project for everyone.
     """
     local, portable = info["path"], info.get("portable")
-    key = portable or local
+    key = portable or path_holder(s, local) or local
     for old in legacy_keys(s, key, portable, [local]):
         fold_project(s, old, key)
     s.q("MERGE (p:Project {id:$id}) ON CREATE SET p.name=$name",
@@ -3219,6 +3239,21 @@ def _check_rekey(s: Store) -> None:
         upsert_project(s, {"id": P, "path": P, "name": "first", "portable": pp})
         upsert_project(s, {"id": P, "path": P + "-b", "name": "second", "portable": pp})
         assert node(pp)[0]["name"] == "first", node(pp)
+        wipe()
+
+        # Regression: a path already folded into another node must resolve
+        # onto that node, not re-key it back under the writing path — a
+        # remote-less write has no identity of its own to fold anything into.
+        write_decision(s, dec("selftest-rk6", P, P, None))
+        write_decision(s, dec("selftest-rk7", P + "-b", P + "-b", None))
+        fold_project(s, P + "-b", P)
+        write_decision(s, dec("selftest-rk8", P + "-b", P + "-b", None))
+        assert (in_project("selftest-rk6") == in_project("selftest-rk7")
+                == in_project("selftest-rk8") == [{"id": P}])
+        assert node(P + "-b") == [], "the merged path must not resurrect its old node"
+        write_decision(s, dec("selftest-rk9", P, P, None))
+        assert in_project("selftest-rk9") == [{"id": P}], \
+            "a write from the surviving id must stay put"
         wipe()
 
         # Replay: an old path-keyed record line, then one carrying the portable id.
