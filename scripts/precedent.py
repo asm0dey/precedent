@@ -1677,9 +1677,10 @@ def identity_gaps(s: "Store") -> list[dict]:
     the newer one. Nothing heals that and nothing else reports it — so this
     does.
 
-    Reports, never merges. Two decision histories are one repo's or two
-    repos', and telling them apart is a judgment; merging them silently is the
-    failure ADR 0002 exists to prevent.
+    Reports, never merges: `merge-project` does, when the caller decides. Two
+    decision histories are one repo's or two repos', and telling them apart is
+    a judgment; merging them silently is the failure ADR 0002 exists to
+    prevent.
 
     Detection is exact rather than a heuristic: `portable` is read from the
     local checkout's own git remote, and a twin is claimed only when another
@@ -1771,8 +1772,15 @@ def cmd_maintain(a, s: Store) -> None:
         if st != "live":
             states[st].append(r)
     print(f"\n== projects whose path no longer exists ({len(states['gone'])}) ==")
+    gone = {r["id"] for r in states["gone"]}
     for r in states["gone"]:
         print(f"  {r['name']}  ({r['id']})")
+        # A ghost (#13) usually shares its name with the project it belongs to.
+        # Offered, never run: which one it is remains a judgment.
+        for c in projects:
+            if c["name"] == r["name"] and c["id"] not in gone and c["id"] != r["id"]:
+                print(f"    merge with: precedent.py merge-project --from {json.dumps(r['id'])}"
+                      f" --into {json.dumps(c['id'])}")
     print(f"\n== projects recorded on another machine ({len(states['elsewhere'])}) ==")
     for r in states["elsewhere"]:
         print(f"  {r['name']}  ({r['id']})  — not gone, just not here")
@@ -1790,12 +1798,10 @@ def cmd_maintain(a, s: Store) -> None:
                   f" {g['portable']}")
             print("     two nodes, two histories, one repo: every new decision lands on"
                   " the second, and this one is stranded.")
-            print("     precedent will not merge them for you — that is a judgment."
-                  " Read both sides first:")
-            print("       precedent.py cypher --params "
-                  f"{json.dumps({'ids': [g['id'], g['twin']['id']]})!r} \\")
-            print('         "MATCH (d:Decision)-[:IN_PROJECT]->(p:Project)'
-                  ' WHERE p.id IN $ids RETURN p.id AS project, d.title AS decision"')
+            print("     one repo, so this is almost certainly one project — but check"
+                  " both sides' decisions first, then:")
+            print(f"       precedent.py merge-project --from {json.dumps(g['id'])}"
+                  f" --into {json.dumps(g['twin']['id'])}")
         elif g["portable"]:
             print(f"  {g['name']}  ({g['id']})  — {g['portable']} is unclaimed,"
                   " so the next write here stamps it")
@@ -3674,6 +3680,40 @@ def _check_graph_format() -> None:
                 "a refused replay must not have wiped the graph"
 
 
+def _check_maintain_hints() -> None:
+    """maintain names the repair, not a hand-written query."""
+    import argparse
+    import contextlib
+    import io
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as tmp_home:
+        base = pathlib.Path(tmp).resolve()
+        with Store(pathlib.Path(tmp_home), write=True) as s:
+            live = base / "calit"
+            live.mkdir()
+            ghost = os.path.join(os.sep + "nonexistent-precedent-selftest", "calit")
+            upsert_project(s, {"id": ghost, "path": ghost, "name": "calit"})
+            upsert_project(s, {"id": str(live), "path": str(live), "name": "calit"})
+
+            pp = "github.com/asm0dey/selftest-mh"
+            split = base / "split"
+            _git_repo(split, "git@github.com:asm0dey/selftest-mh.git")
+            upsert_project(s, {"id": "/tmp/precedent-selftest-mh", "name": "mh",
+                               "path": "/tmp/precedent-selftest-mh", "portable": pp})
+            upsert_project(s, {"id": str(split), "path": str(split), "name": "mh"})
+
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                cmd_maintain(argparse.Namespace(apply=False), s)
+            text = out.getvalue()
+            assert (f"merge-project --from {json.dumps(ghost)}"
+                    f" --into {json.dumps(str(live))}") in text, text
+            assert (f"merge-project --from {json.dumps(str(split))}"
+                    f" --into {json.dumps(pp)}") in text, text
+            assert "cypher --params" not in text, "the hand-written query is replaced"
+
+
 def _check_portable_replay() -> None:
     """0.4.x `brief` journalled `project_portable` when a project gained a
     remote. Replayed now, it folds the node it names into the portable key —
@@ -3769,6 +3809,7 @@ def cmd_selftest(a, s: Store) -> None:
     _check_settle()
     _check_merge_project()
     _check_graph_format()
+    _check_maintain_hints()
     _check_portable_replay()
     after = s.q("MATCH (n) RETURN count(n) AS n")[0]["n"]
     assert after == before, f"selftest changed node count {before} -> {after}"
