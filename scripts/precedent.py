@@ -826,17 +826,25 @@ def normalised(tag: str) -> str:
 
 
 def path_holder(s: Store, path: str) -> str | None:
-    """The portable-less node already holding `path`: its id, or None.
+    """The node already holding a remote-less `path`: its id, or None.
 
     Without a remote a path has no identity of its own to fold anything
     into — it belongs to whichever node already holds it (after a merge,
-    a node keyed on another path). An exact id match wins over a node that
-    merely lists the path, so an unmerged project always resolves to itself.
+    a node keyed on another path, or a remote-keyed project a notes folder
+    was merged into). An exact id match wins, so an unmerged project always
+    resolves to itself; then a portable-less node listing the path; then a
+    remote-keyed one. Resolving ONTO a remote-keyed node is not folding it:
+    `legacy_keys` still never folds a node with a portable on a path match.
     """
-    rows = s.q("""MATCH (p:Project) WHERE p.portable IS NULL
-                  RETURN p.id AS id, p.paths AS paths""")
-    hits = sorted(r["id"] for r in rows if path in (paths_of(r) or [r["id"]]))
-    return path if path in hits else (hits[0] if hits else None)
+    rows = s.q("MATCH (p:Project) RETURN p.id AS id, p.paths AS paths, p.portable AS pp")
+    hits = [r for r in rows if path in (paths_of(r) or [r["id"]])]
+    if any(r["id"] == path for r in hits):
+        return path
+    for want_portable in (False, True):
+        ids = sorted(r["id"] for r in hits if bool(r["pp"]) == want_portable)
+        if ids:
+            return ids[0]
+    return None
 
 
 def legacy_keys(s: Store, key: str, portable: str | None,
@@ -3669,6 +3677,46 @@ def _check_merge_replay() -> None:
             check("after rebuild")
 
 
+def _check_merged_into_portable() -> None:
+    """A remote-less directory merged into a remote-keyed project stays there.
+
+    `merge-project --from <notes> --into <repo>` worked, but the next record
+    from notes/ keyed a fresh notes node: the lookup for a remote-less path
+    only asked portable-less nodes, so the portable node now listing that
+    path was never found.
+
+    Throwaway Store: record and merge-project journal.
+    """
+    import argparse
+    import contextlib
+    import io
+    import tempfile
+
+    pp = "github.com/asm0dey/selftest-mip"
+    with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as tmp_home:
+        base = pathlib.Path(tmp).resolve()
+        notes, repo = base / "notes", base / "repo"
+        notes.mkdir()
+        _git_repo(repo, "git@github.com:asm0dey/selftest-mip.git")
+        with Store(pathlib.Path(tmp_home), write=True) as s:
+            record = lambda where, did: cmd_record(build_parser().parse_args(
+                ["record", "--project", str(where), "--title", did, "--id", did,
+                 "--rationale", "r"]), s)
+            with contextlib.redirect_stdout(io.StringIO()):
+                record(notes, "selftest-mip1")
+                record(repo, "selftest-mip2")
+                cmd_merge_project(argparse.Namespace(frm=str(notes), into=str(repo)), s)
+                n = s.q("MATCH (p:Project) RETURN count(p) AS n")[0]["n"]
+                record(notes, "selftest-mip3")
+            assert s.q("MATCH (p:Project) RETURN count(p) AS n")[0]["n"] == n, \
+                "a merged remote-less path must not key a new node"
+            assert s.q("""MATCH (:Decision {id:'selftest-mip3'})-[:IN_PROJECT]->(p:Project)
+                          RETURN p.id AS id""") == [{"id": pp}]
+            assert project_info(s, str(notes))["id"] == pp, "readers resolve it the same way"
+            replay_journal(s)
+            assert s.q("MATCH (p:Project) RETURN count(p) AS n")[0]["n"] == n, "rebuild too"
+
+
 def _check_graph_format() -> None:
     """An older store is re-keyed once, by a writer, and never again; a
     too-new journal is refused before anything is wiped.
@@ -3902,6 +3950,7 @@ def cmd_selftest(a, s: Store) -> None:
     _check_settle()
     _check_merge_project()
     _check_merge_replay()
+    _check_merged_into_portable()
     _check_graph_format()
     _check_maintain_hints()
     _check_portable_replay()
