@@ -8,7 +8,7 @@ Read this before writing ad-hoc Cypher via `precedent.py cypher`. The engine is 
 | Label | Key | Properties |
 |---|---|---|
 | `Decision` | `id` | `title`, `statement`, `rationale`, `scope`, `status`, `created`, `despite` |
-| `Project` | `id` (native path of first sighting) | `name`, `seen`, `portable`, `paths` |
+| `Project` | `id` (portable id, else main-checkout path) | `name`, `seen`, `portable`, `paths` |
 | `Tag` | `name` | — |
 | `Topic` | `name` (lowercased) | — |
 | `Option` | `name` | — |
@@ -74,17 +74,19 @@ then decisions are read from the projects that scored above `--min-shared`.
 
 ## Identity
 
-`Project.portable` is the identity: the git remote reduced to `host/owner/repo`,
-plus a `#/subpath` for a module inside it. `Project.id` is only the native path
-this project was first seen at, and stays the graph key — every query that
-matches a node matches on `id`.
+`Project.id` is now the portable id when a git remote exists — `origin`,
+else the only remote there is; several and no `origin` is no remote. Without
+one it is the path of the main checkout, with linked worktrees mapped onto
+it. `Project.portable` is kept equal to `id` so 0.4.x, which looks nodes up
+by it, keeps working. `Project.paths` still holds every local path, and
+containment is still derived from it. See `docs/adr/0002` and `docs/adr/0009`.
 
-`Project.paths` is every native path the project has been seen at, one per line
-(a string, not a list property). Both reads and writes resolve `portable` to an
-existing `id` before touching a node, so one repository checked out on two
-machines is one Project rather than two with no shared precedent. A repo with no
-remote has no `portable` and behaves exactly as it did before. See
-`docs/adr/0002`.
+Without a remote, a write resolves onto whichever node already holds the path
+(`path_holder`: exact id, then a portable-less node listing it, then a
+remote-keyed one) rather than folding that node into the path —
+only a node keyed on one of its own paths folds in. This keeps an id a
+`merge-project` has settled from drifting back to a plain path the next time
+something writes there.
 
 ## Containment
 
@@ -146,18 +148,39 @@ that is what keeps every line written before versioning replayable — and
 REFUSES a line whose `v` exceeds `SCHEMA`, stopping the rebuild rather than
 guessing at keys it does not know.
 
-`op` is `record`, `amend`, `project_tags`, `project_portable`, `tag_merge`, `regret`
-or `principle`; the pre-tag `project_type` and the retired `tags_distinct` are still
+`op` is `record`, `amend`, `project_tags`, `project_portable`, `project_merge`,
+`tag_merge`, `regret` or `principle`; the pre-tag `project_type` and the retired `tags_distinct` are still
 replayed so old journals keep working. The list is exhaustive: `replay_entry`
 raises on an op it does not know rather than counting a silent no-op as a
 successful replay, so a new op must be added there and here together.
 `precedent.py rebuild` replays the file in order, so entries must stay
 append-only — editing or reordering lines rewrites history.
 
-`project_portable` carries `project_id` and `portable` only. It is written by
-`brief` when a project that predates portable ids acquires one, and replays as
-`MATCH ... SET` — never a `MERGE`, because `brief` must never create a project
-node and its journal line must not either.
+`project_portable` carries `project_id` and `portable`. 0.4.x `brief` wrote it
+when a project gained a remote; it is no longer written. Replayed, it folds the
+named node into its portable key — and only if that node exists, so it never
+creates one.
+
+`project_merge` carries `from`, `into` and the target's identity: `portable`,
+`name` and — when the target was resolved from a directory — `project_path`.
+It is written by `merge-project` and by `settle()` when a writer folds an older
+key into the project's key. Replay upserts the target from `project_path`,
+`name` and `portable` (when `project_path` is present), then calls
+`fold_project(from, into)`, so a target the merge created comes back with its
+live path and portable id rather than as a rename of the source. A missing
+`from` is a no-op. Lines written before these fields existed carry only
+`from`, `into` and optionally `portable`, and fold exactly as they did. It stays at `v: 1` so 0.4.x skips it as an unknown op instead of
+stopping the rebuild.
+
+`(:Meta {id:'meta', graph_format})` marks the graph layout. A writer that finds
+it missing or below the current value replays the journal once. The replay is
+claimed, not locked: one statement sets `claim`/`claimed` on the node only if
+nobody already holds a fresh one, so two writers racing it cannot both replay;
+a claim older than 300 seconds is stale and can be retaken. The wipe a replay
+starts with spares `:Meta`, so the claim survives it, and writing the new
+`graph_format` clears it. A reader can open the store mid-replay and see a
+graph short whatever has not gone back in yet — the same window a manual
+`rebuild` has always had.
 
 `project_path` and `portable` are how a replay on a second machine resolves onto
 the project that is already there instead of inventing another. **Both `record`
@@ -180,10 +203,11 @@ cannot blank a rationale. Nothing else on the decision is amendable: topics,
 options, scope and project are *what was decided*, and changing one of those
 is a different decision, recorded with `record --supersedes`.
 
-It replays as `MATCH ... SET` — never a `MERGE`, for the same reason
-`project_portable` does not: an amendment must not fabricate a decision out of
-a rewording when the `record` line above it was unreadable. Journal order puts
-that line first, so a miss means it was skipped and already reported.
+It replays as `MATCH ... SET` — never a `MERGE`: an amendment must not
+fabricate a decision out of a rewording when the `record` line above it was
+unreadable, just as a `project_portable` line never creates a project. Journal
+order puts that line first, so a miss means it was skipped and already
+reported.
 
 The id does not change, including the now-stale title slug inside it. See
 `docs/adr/0008`.

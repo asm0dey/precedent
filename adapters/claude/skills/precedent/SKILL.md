@@ -420,6 +420,18 @@ uv run <skill>/../../../../scripts/precedent.py tag --merge tg-bot --into telegr
 Every project carrying the old tag is retagged, the merge is journalled, and
 `rebuild` replays it.
 
+A project that split in two — a ghost from a mistyped `--project`, or an old
+node `maintain` reports — is joined the same way, once the user agrees they
+are one project:
+
+```bash
+uv run <skill>/../../../../scripts/precedent.py merge-project --from "<id from maintain>" --into .
+```
+
+Decisions, tags and paths move; decision ids do not change; the merge is
+journalled. Any contradiction it creates is printed — drive it to a supersede
+or a `--despite`. `--project` must be a directory: pass `.`, never a name.
+
 An untagged project still records decisions perfectly well; it just never
 surfaces as precedent anywhere, and `brief` says so and lists the tags on offer.
 Tag it when you know what it is — guessing early is worse than waiting.
