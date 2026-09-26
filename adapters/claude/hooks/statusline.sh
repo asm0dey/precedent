@@ -26,7 +26,7 @@ esac
 dir=${dir//\\\\/\\}
 
 MARK="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.precedent-primed/${dir//[^A-Za-z0-9-]/_}"
-[ -L "$MARK" ] && exit 0
-[ -f "$MARK" ] || exit 0
+[[ -L "$MARK" ]] && exit 0
+[[ -f "$MARK" ]] || exit 0
 
 printf '\033[38;5;110m[PRECEDENT]\033[0m'

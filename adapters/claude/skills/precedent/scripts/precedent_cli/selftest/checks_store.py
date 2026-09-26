@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 import os
 import pathlib
@@ -9,7 +10,7 @@ import time
 
 from ..admin import cmd_standing_orders, export_to, relocate
 from ..cli import build_parser, wants_write
-from ..core import CLI, AMENDABLE, GRAPH, GRAPH_FORMAT, JOURNAL, JournalTooNew, POINTER, SCHEMA, Store, csv, slug, today
+from ..core import CLI, AMENDABLE, GRAPH, GRAPH_FORMAT, JOURNAL, JournalTooNew, POINTER, SCHEMA, Store, csv, resolve_home, slug, today
 from ..replay import replay_entry, replay_journal
 
 LOCK_FILE = ".lock"   # a pre-engine-swap store's lock file; relocate leaves it behind
@@ -66,13 +67,13 @@ def _check_relocate() -> None:
         base = pathlib.Path(td) / "home"
         dflt, tgt = base / "default", base / "elsewhere"
         relocate(tgt, dflt)
-        assert (dflt / POINTER).read_text().strip() == str(tgt), \
+        assert (dflt / POINTER).read_text(encoding="utf-8").strip() == str(tgt), \
             "fresh default must get a pointer"
 
         _sh.rmtree(base); dflt.mkdir(parents=True)
-        (dflt / JOURNAL).write_text("x\n"); (dflt / LOCK_FILE).write_text("")
+        (dflt / JOURNAL).write_text("x\n", encoding="utf-8"); (dflt / LOCK_FILE).write_text("", encoding="utf-8")
         relocate(tgt, dflt)
-        assert (tgt / JOURNAL).read_text() == "x\n", \
+        assert (tgt / JOURNAL).read_text(encoding="utf-8") == "x\n", \
             "an existing store must move, not vanish"
         # The .lock prefix filter exists so the lock stays with the path
         # processes still queue on. A moved lock file is how relocation
@@ -82,11 +83,47 @@ def _check_relocate() -> None:
         assert (dflt / LOCK_FILE).exists(), "the lock file must stay at the old path"
 
         _sh.rmtree(base); dflt.mkdir(parents=True); tgt.mkdir(parents=True)
-        (dflt / JOURNAL).write_text("a\n"); (tgt / JOURNAL).write_text("b\n")
+        (dflt / JOURNAL).write_text("a\n", encoding="utf-8"); (tgt / JOURNAL).write_text("b\n", encoding="utf-8")
         _expect_exit(relocate, tgt, dflt,
                      message="two populated stores must not be merged silently")
-        assert (dflt / JOURNAL).read_text() == "a\n"
+        assert (dflt / JOURNAL).read_text(encoding="utf-8") == "a\n"
+
+        # A store path a Western Windows codepage cannot spell. The pointer is
+        # text; written in the locale's encoding it raises there, or reads
+        # back as something else, and the store becomes unreachable.
+        _sh.rmtree(base); dflt.mkdir(parents=True)
+        wide = base / "Жёлудь"
+        relocate(wide, dflt)
+        assert resolve_home(dflt) == wide, "a non-ASCII store path must survive the pointer"
         _sh.rmtree(base)
+
+
+def _lacks_encoding(call: ast.Call) -> bool:
+    """A text-mode open/read_text/write_text call with no encoding= argument."""
+    fn = call.func
+    name = fn.id if isinstance(fn, ast.Name) else getattr(fn, "attr", None)
+    if name not in ("open", "read_text", "write_text"):
+        return False
+    if any(k.arg == "encoding" for k in call.keywords):
+        return False
+    mode = call.args[1] if name == "open" and len(call.args) > 1 else None
+    mode = next((k.value for k in call.keywords if k.arg == "mode"), mode)
+    return not (isinstance(mode, ast.Constant) and "b" in str(mode.value))
+
+
+def _check_utf8_io() -> None:
+    """Every text-mode file open in the CLI names its encoding.
+
+    Without one, Python uses the locale's codepage: cp1252 on a Western
+    Windows, which cannot spell a Cyrillic store path in the relocation
+    pointer. The gap is invisible on Linux and macOS, whose locale is UTF-8,
+    so this reads the source instead of waiting for a Windows user to hit it.
+    """
+    offenders = [f"{f.name}:{node.lineno}"
+                 for f in [CLI, *CLI.parent.joinpath("precedent_cli").rglob("*.py")]
+                 for node in ast.walk(ast.parse(f.read_text(encoding="utf-8")))
+                 if isinstance(node, ast.Call) and _lacks_encoding(node)]
+    assert not offenders, f"text-mode file I/O without an encoding: {offenders}"
 
 
 def _check_export(s: Store) -> None:

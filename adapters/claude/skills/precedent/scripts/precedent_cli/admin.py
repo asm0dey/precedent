@@ -64,7 +64,7 @@ def relocate(target: pathlib.Path, default: pathlib.Path = DEFAULT_HOME) -> str:
         _ensure_removable(f)
     for f in payload:
         shutil.move(str(f), str(target / f.name))
-    (default / POINTER).write_text(str(target) + "\n")
+    (default / POINTER).write_text(str(target) + "\n", encoding="utf-8")
     moved = f"  moved {len(payload)} file(s) from the default location\n" if payload else ""
     return f"store: {target}\n{moved}  {default}/{POINTER} points here"
 

@@ -462,7 +462,7 @@ def _report_orphans(a, s: Store) -> None:
 def _report_counts(s: Store) -> None:
     d = s.q("MATCH (d:Decision) RETURN count(d) AS n")[0]["n"]
     p = s.q("MATCH (p:Project) RETURN count(p) AS n")[0]["n"]
-    lines = sum(1 for _ in open(s.journal)) if s.journal.exists() else 0
+    lines = sum(1 for _ in open(s.journal, encoding="utf-8")) if s.journal.exists() else 0
     print(f"\ngraph: {d} decisions across {p} projects | journal: {lines} entries")
     print(f"home:  {s.home}")
 
