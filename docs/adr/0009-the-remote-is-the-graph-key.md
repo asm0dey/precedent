@@ -15,8 +15,12 @@ by it, keeps working. `Project.paths` still holds every local path, and
 containment is still derived from it.
 
 Without a remote, a path is not an identity of its own to fold anything
-into, so a write there resolves onto whichever portable-less node already
-holds it (`path_holder`) instead of the other way round. Only a node keyed
+into, so a write there resolves onto whichever node already holds it
+(`path_holder`) instead of the other way round: its own id first, then a
+portable-less node listing it, then a remote-keyed one — so a notes folder
+merged into a remote-keyed project stays there. Resolving onto a remote-keyed
+node is not folding it; a node with a different portable is still never
+folded on a path match. Only a node keyed
 on one of its own paths — a worktree keyed on itself, say — is what folds
 in. A node that merely lists the path already owns it, and matching on that
 membership too would drag it back under whichever path last wrote — undoing
@@ -30,7 +34,14 @@ under an older key — the same portable id under a path, or a portable-less
 node on one of its paths — into the new key, on every write and every
 replay. A `(:Meta {graph_format: 2})` marker makes the first writer replay
 the journal once. Folds the journal cannot reproduce on its own are
-journalled as `project_merge`, the same op `merge-project` writes.
+journalled as `project_merge`, the same op `merge-project` writes. Each such
+line carries the target's `portable`, `project_path` and `name` as well as
+`from` and `into`, and replay upserts the target from them before folding:
+a target the fold itself created (a merge into a directory with no node, a
+key that did not exist yet) would otherwise come back as a rename of the
+source — its dead paths only, no portable id. `settle()` also adds the live
+path to the key node, so a fold from a worktree leaves the main checkout's
+path on it.
 
 The first writer is decided by a claim, not a lock: one statement sets
 `claim`/`claimed` on `(:Meta {id:'meta'})`, conditioned on nobody already
@@ -70,7 +81,10 @@ truth — reached automatically now instead of by a command the user typed.
   machine; an enclosing plain folder stops enclosing a clone elsewhere.
   Known limitation; an `alias-path` command is the follow-up if it bites.
 - A directory whose remote changes to a different one gets a new node;
-  `maintain` reports the pair and `merge-project` joins them if they are one.
+  `maintain` reports the pair under "one checkout, two remotes" when the
+  shared checkout is on this machine, with a `merge-project` line from the
+  other node into the one the checkout now reports. It never merges: a fork
+  and its upstream are two projects.
 - `--project` must name a directory.
 - Every `merge-project` line this prints — in `maintain`'s output and in the
   skill docs that show the command — quotes both ids in plain double quotes

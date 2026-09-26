@@ -81,8 +81,9 @@ it. `Project.portable` is kept equal to `id` so 0.4.x, which looks nodes up
 by it, keeps working. `Project.paths` still holds every local path, and
 containment is still derived from it. See `docs/adr/0002` and `docs/adr/0009`.
 
-Without a remote, a write resolves onto whichever portable-less node already
-holds the path (`path_holder`) rather than folding that node into the path —
+Without a remote, a write resolves onto whichever node already holds the path
+(`path_holder`: exact id, then a portable-less node listing it, then a
+remote-keyed one) rather than folding that node into the path —
 only a node keyed on one of its own paths folds in. This keeps an id a
 `merge-project` has settled from drifting back to a plain path the next time
 something writes there.
@@ -160,10 +161,15 @@ when a project gained a remote; it is no longer written. Replayed, it folds the
 named node into its portable key — and only if that node exists, so it never
 creates one.
 
-`project_merge` carries `from`, `into` and optionally `portable`. It is written
-by `merge-project` and by `settle()` when a writer folds an older key into the
-project's key. Replay calls `fold_project(from, into)`; a missing `from` is a
-no-op. It stays at `v: 1` so 0.4.x skips it as an unknown op instead of
+`project_merge` carries `from`, `into` and the target's identity: `portable`,
+`name` and — when the target was resolved from a directory — `project_path`.
+It is written by `merge-project` and by `settle()` when a writer folds an older
+key into the project's key. Replay upserts the target from `project_path`,
+`name` and `portable` (when `project_path` is present), then calls
+`fold_project(from, into)`, so a target the merge created comes back with its
+live path and portable id rather than as a rename of the source. A missing
+`from` is a no-op. Lines written before these fields existed carry only
+`from`, `into` and optionally `portable`, and fold exactly as they did. It stays at `v: 1` so 0.4.x skips it as an unknown op instead of
 stopping the rebuild.
 
 `(:Meta {id:'meta', graph_format})` marks the graph layout. A writer that finds

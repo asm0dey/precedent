@@ -492,6 +492,9 @@ def identity_path(root: pathlib.Path) -> pathlib.Path:
     one stable key per project, just not a pretty one.
     """
     root = root.resolve()
+    # git < 2.31 has no --path-format and echoes "--path-format=absolute" back
+    # as output. The paths below then fail to match, and the mapping falls back
+    # to the directory itself — the safe answer, never a wrong project.
     top = git_out(root, "rev-parse", "--show-toplevel")
     git_dir = git_out(root, "rev-parse", "--path-format=absolute", "--git-dir")
     common = git_out(root, "rev-parse", "--path-format=absolute", "--git-common-dir")
@@ -913,7 +916,10 @@ def upsert_project(s: Store, info: dict) -> dict:
     project was keyed by before folds in here, on writes and on replay alike,
     so a store converges on one node per project with no migration step to
     remember. These folds need no journal line: replay reproduces them from
-    the `portable` and `project_path` every line already carries.
+    the `portable` and `project_path` every line already carries. The folds
+    `settle()` and `merge-project` perform at runtime are different — a
+    worktree keyed on its own path, or a ghost, cannot be derived from any
+    line's data — so those are journalled as `project_merge`.
 
     The name is set once, at creation: a write from a worktree or a clone
     under another directory name must not rename the project for everyone.
@@ -1636,6 +1642,7 @@ def cmd_merge_project(a, s: Store) -> None:
         if a.frm in info["legacy"]:
             settle(s, info)
             print(f"{a.frm} was an older key of {info['key']} — folded into it")
+            print_new_clashes(s, info["key"])
             return
         if info["key"] == a.frm:
             into = a.frm
@@ -1649,6 +1656,12 @@ def cmd_merge_project(a, s: Store) -> None:
     s.log("project_merge", {"from": a.frm, "into": into, **target})
     moved = fold_project(s, a.frm, into)
     print(f"merged {a.frm} into {into} — {moved} decision(s) moved")
+    print_new_clashes(s, into)
+
+
+def print_new_clashes(s: Store, into: str) -> None:
+    """The contradictions a merge just put in one project, in maintain's
+    format. Shown, never resolved: which answer stands is the user's call."""
     for r in contradictions_in(s, into):
         print(f"  now contradicting: {r['project']}/{r['topic']} — supersede one:")
         for did, opts in sorted(r["decisions"].items()):
@@ -3811,6 +3824,46 @@ def _check_remote_changed() -> None:
             assert s.q("MATCH (p:Project) RETURN count(p) AS n")[0]["n"] == n
 
 
+def _check_merge_legacy_clash() -> None:
+    """merge-project shows the clashes it creates on every path, including
+    the one where `--from` turns out to be the target's own older key.
+
+    Throwaway Store: merge-project and record journal.
+    """
+    import argparse
+    import contextlib
+    import io
+    import tempfile
+
+    pp = "github.com/asm0dey/selftest-mlc"
+    old = os.path.join(os.sep + "nonexistent-precedent-selftest", "mlc")
+    with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as tmp_home:
+        repo = pathlib.Path(tmp).resolve() / "mlc"
+        _git_repo(repo, "git@github.com:asm0dey/selftest-mlc.git")
+        with Store(pathlib.Path(tmp_home), write=True) as s:
+            with contextlib.redirect_stdout(io.StringIO()):
+                cmd_record(build_parser().parse_args(
+                    ["record", "--project", str(repo), "--title", "selftest-mlc1",
+                     "--id", "selftest-mlc1", "--rationale", "r", "--topic", "selftest-mlc-cache",
+                     "--chose", "memcached"]), s)
+            # What 0.4.x leaves: a path-keyed node carrying the same portable id.
+            s.q("CREATE (:Project {id:$id, name:'mlc', portable:$pp, paths:$id})",
+                {"id": old, "pp": pp})
+            s.q("CREATE (:Decision {id:'selftest-mlc2', status:'active'})")
+            s.q("MERGE (:Topic {name:'selftest-mlc-cache'})")
+            s.q("MERGE (:Option {name:'redis'})")
+            s.q("""MATCH (d:Decision {id:'selftest-mlc2'}), (p:Project {id:$id}),
+                         (t:Topic {name:'selftest-mlc-cache'}), (o:Option {name:'redis'})
+                   MERGE (d)-[:IN_PROJECT]->(p) MERGE (d)-[:ABOUT]->(t)
+                   MERGE (d)-[:CHOSE]->(o)""", {"id": old})
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                cmd_merge_project(argparse.Namespace(frm=old, into=str(repo)), s)
+            assert "older key" in out.getvalue(), out.getvalue()
+            assert "selftest-mlc-cache" in out.getvalue(), \
+                f"the clash the fold created must be shown: {out.getvalue()}"
+
+
 def _check_graph_format() -> None:
     """An older store is re-keyed once, by a writer, and never again; a
     too-new journal is refused before anything is wiped.
@@ -4046,6 +4099,7 @@ def cmd_selftest(a, s: Store) -> None:
     _check_merge_replay()
     _check_merged_into_portable()
     _check_remote_changed()
+    _check_merge_legacy_clash()
     _check_graph_format()
     _check_maintain_hints()
     _check_portable_replay()
