@@ -496,37 +496,37 @@ def _check_verdicts(s: Store) -> None:
     # Task 2b's lock-mode check once proving the library rather than the
     # code's use of it.
     import tempfile
-    with tempfile.TemporaryDirectory() as tmp_home:
-        with Store(pathlib.Path(tmp_home), write=True) as ps:
-            with contextlib.redirect_stdout(io.StringIO()):
-                cmd_principle(_argparse.Namespace(
-                    id="selftest-p2", statement="selftest-p2 statement",
-                    derived_from="", topic="selftest-p2-topic"), ps)
-            written = ps.q("""MATCH (pr:Principle {id:'selftest-p2'})
-                                    -[:ABOUT]->(t:Topic {name:'selftest-p2-topic'})
-                              RETURN pr.id AS id""")
-            assert written, "cmd_principle --topic must create the ABOUT edge"
+    with tempfile.TemporaryDirectory() as tmp_home, \
+            Store(pathlib.Path(tmp_home), write=True) as ps:
+        with contextlib.redirect_stdout(io.StringIO()):
+            cmd_principle(_argparse.Namespace(
+                id="selftest-p2", statement="selftest-p2 statement",
+                derived_from="", topic="selftest-p2-topic"), ps)
+        written = ps.q("""MATCH (pr:Principle {id:'selftest-p2'})
+                                -[:ABOUT]->(t:Topic {name:'selftest-p2-topic'})
+                          RETURN pr.id AS id""")
+        assert written, "cmd_principle --topic must create the ABOUT edge"
 
-            # Drop the edge to simulate a graph rebuilt from the journal
-            # alone, then replay the exact payload cmd_principle wrote
-            # (topics included) and confirm replay recreates it. This is the
-            # silent-data-loss path: without it, a principle recorded today
-            # would carry its topics in the journal but lose them on the
-            # next rebuild, and `check` would stop surfacing it with no
-            # error anywhere.
-            ps.q("""MATCH (:Principle {id:'selftest-p2'})-[r:ABOUT]->(:Topic)
-                    DELETE r""")
-            gone = ps.q("""MATCH (pr:Principle {id:'selftest-p2'})-[:ABOUT]->(:Topic)
+        # Drop the edge to simulate a graph rebuilt from the journal
+        # alone, then replay the exact payload cmd_principle wrote
+        # (topics included) and confirm replay recreates it. This is the
+        # silent-data-loss path: without it, a principle recorded today
+        # would carry its topics in the journal but lose them on the
+        # next rebuild, and `check` would stop surfacing it with no
+        # error anywhere.
+        ps.q("""MATCH (:Principle {id:'selftest-p2'})-[r:ABOUT]->(:Topic)
+                DELETE r""")
+        gone = ps.q("""MATCH (pr:Principle {id:'selftest-p2'})-[:ABOUT]->(:Topic)
+                       RETURN pr.id AS id""")
+        assert not gone, "edge must be gone before replay is exercised"
+        replay_entry(ps, {"op": "principle", "id": "selftest-p2",
+                          "statement": "selftest-p2 statement",
+                          "derived_from": [], "topics": ["selftest-p2-topic"],
+                          "ts": today()})
+        replayed = ps.q("""MATCH (pr:Principle {id:'selftest-p2'})
+                                 -[:ABOUT]->(t:Topic {name:'selftest-p2-topic'})
                            RETURN pr.id AS id""")
-            assert not gone, "edge must be gone before replay is exercised"
-            replay_entry(ps, {"op": "principle", "id": "selftest-p2",
-                              "statement": "selftest-p2 statement",
-                              "derived_from": [], "topics": ["selftest-p2-topic"],
-                              "ts": today()})
-            replayed = ps.q("""MATCH (pr:Principle {id:'selftest-p2'})
-                                     -[:ABOUT]->(t:Topic {name:'selftest-p2-topic'})
-                               RETURN pr.id AS id""")
-            assert replayed, "replay_entry must recreate the ABOUT edge from topics"
+        assert replayed, "replay_entry must recreate the ABOUT edge from topics"
 
 
 def _check_maintain(s: Store) -> None:
