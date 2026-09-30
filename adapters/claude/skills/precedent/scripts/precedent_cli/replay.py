@@ -5,7 +5,7 @@ import json
 from .core import GRAPH_FORMAT, JournalTooNew, SCHEMA, Store
 from .maintain import apply_tag_merge
 from .projects import attach_tags, fold_project, upsert_project
-from .writing import apply_amend, apply_regret, write_decision
+from .writing import apply_amend, apply_refile, apply_regret, link_topics, write_decision
 
 
 def mark_graph_format(s: "Store") -> None:
@@ -150,10 +150,7 @@ def _replay_project_merge(s: Store, e: dict) -> None:
 def _replay_principle(s: Store, e: dict) -> None:
     s.q("""MERGE (pr:Principle {id:$id})
            SET pr.statement=$statement, pr.created=$ts""", e)
-    for topic in e.get("topics", []):
-        s.q("MERGE (t:Topic {name:$n})", {"n": topic})
-        s.q("""MATCH (pr:Principle {id:$id}),(t:Topic {name:$n})
-               MERGE (pr)-[:ABOUT]->(t)""", {"id": e["id"], "n": topic})
+    link_topics(s, "Principle", e["id"], e.get("topics", []))
     for did in e.get("derived_from", []):
         s.q("""MATCH (pr:Principle {id:$id}),(d:Decision {id:$did})
                MERGE (pr)-[:DERIVED_FROM]->(d)""", {"id": e["id"], "did": did})
@@ -169,6 +166,7 @@ _REPLAY_OPS = {
     "project_merge": _replay_project_merge,
     "regret": apply_regret,
     "amend": apply_amend,
+    "refile": apply_refile,
     "principle": _replay_principle,
 }
 

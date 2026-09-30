@@ -105,7 +105,9 @@ either of the first two, and "that's not really what I decided" is usually the
 third rather than a new decision.
 
 Offer, do not act. Draft the command, show the one-line summary, run it when
-they confirm.
+they confirm. The one exception is an explicit settlement, covered under
+"A decision just got made": "decided", "settled", "let's go with X" is the
+confirmation.
 
 The failure mode this guards against is not refusing to use the graph; it is
 using it once, at the start, and then spending the rest of the session
@@ -201,8 +203,26 @@ uv run <skill>/scripts/precedent.py record \
 from the code and the *why* is not. `--rejected` is what powers the CONFLICT
 verdict later, so record the alternatives they actually turned down.
 
+**`--topic` names the question, never the project.** A tag says what kind of
+project this is (`java`, `telegram-bot`, `frontend`); a topic says which
+question the decision answers (`persistence`, `backend-framework`). Topics
+match one by one, so a tag added as a second topic narrows nothing — it opens
+a bucket where Quarkus, a Java formatter and an import style all "answer" the
+same question, and `check` reports a false DIVERGENCE between them. Test it
+before writing: *would this project hold a second live decision under the same
+topic without contradicting the first?* If yes, the topic is an area, not a
+question — make it specific. When a qualifier is needed, put it inside one
+topic (`frontend-framework`, `java-formatting`), never beside a bare noun
+(`framework` + `frontend`). Prefer a topic already in use for the same
+question; `record` prints a note when a topic is also a tag.
+
 Ask before writing, not after. A wrong entry is worse than a missing one,
-because it will be quoted back as precedent.
+because it will be quoted back as precedent. **An explicit settlement is the
+answer to that question:** when the user says "decided", "settled", "going with
+X", record it in the same turn and report it in one line. Do not draft and wait.
+If one piece is missing (no stated reason for a `--despite`, say), record what
+they gave and ask for the missing piece at the end. Asking again only when
+nothing was settled is what keeps a question from turning into a record.
 
 **Recording is a side effect, never the reply.** People settle a decision and
 move on in the same breath — *"ok, SQLite with litestream, now let's talk about
@@ -238,7 +258,7 @@ records. Pick by what is actually true:
 | The precedent is sound, but **this project is genuinely different** | `record --despite "<why this project differs>"` | Warning is answered here, and only here |
 | The choice was right then and is **wrong now, in this project** | `record --supersedes <id>` | Old decision marked superseded, reasoning kept |
 | The choice was **wrong everywhere**, and you repeated it | `regret --topic … --chose … --because "<lesson>"` | Every instance marked regretted; the verdict inverts |
-| The choice was right — the **record of it reads wrong** | `amend --id <id> --title "<better words>"` | Only the wording; no second decision, no supersession, id unchanged |
+| The choice was right — the **record of it reads wrong** | `amend --id <id> --title "<better words>"` (or `--topic` to refile it) | Only the wording or filing; no second decision, no supersession, id unchanged |
 
 The first is the one people skip, and skipping it is expensive. Diverge without
 recording why and the graph reports `DIVERGENCE` in that project forever — a
@@ -250,8 +270,10 @@ rather than to a choice, and the cheap mistake is superseding instead. A
 supersession writes a second decision and makes `check` carry both — an
 assertion that the call was revisited. For a rewording that history never
 happened, and it is asserted in the line `check` quotes first. Amend takes
-`--title`, `--statement` and `--rationale`; anything else — a different option,
-a different topic — is a different decision, so that really is `--supersedes`.
+`--title`, `--statement`, `--rationale` and `--topic`. `--topic` replaces the
+whole topic set and is for a decision filed under the wrong question, such as a
+project tag used as a topic. A different option is a different decision, so
+that really is `--supersedes`.
 
 ```bash
 uv run <skill>/scripts/precedent.py record --project . \

@@ -16,10 +16,11 @@ DEFAULT_HOME = pathlib.Path.home() / ".local/share/precedent"
 HOME = pathlib.Path(os.environ.get("PRECEDENT_HOME", DEFAULT_HOME))
 SCOPES = ("architecture", "business", "process", "tooling", "product")
 # The fields an amendment may rewrite: how the decision was DESCRIBED.
-# Everything else on a Decision — its topics, its options, its scope, the
-# project it belongs to — is WHAT WAS DECIDED, and changing one of those is a
-# different decision, which is `record --supersedes`. Also the whitelist that
-# makes apply_amend's f-string SET clause safe.
+# Its options, its scope and the project it belongs to are WHAT WAS DECIDED,
+# and changing one of those is a different decision, which is
+# `record --supersedes`. Also the whitelist that makes apply_amend's f-string
+# SET clause safe. Topics are amendable too, but as edges, not properties —
+# see apply_refile: which question a decision is filed under is description.
 AMENDABLE = ("title", "statement", "rationale")
 POINTER = "location"
 # The STANDING_ORDERS banner is this script's one copy; the session-start hook
