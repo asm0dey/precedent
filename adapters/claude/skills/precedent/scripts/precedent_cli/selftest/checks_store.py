@@ -526,13 +526,13 @@ def _check_graph_format() -> None:
             assert meta(s) == [], "a reader must not migrate"
 
         out, err = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            with Store(home, write=True) as s:
-                assert s.q(PROJECT_BY_ID, {"id": old}) == []
-                assert s.q("""MATCH (:Decision {id:'selftest-gf1'})-[:IN_PROJECT]->(p:Project)
-                              RETURN p.id AS id""") == [{"id": pp}]
-                assert meta(s) == [{"f": GRAPH_FORMAT}]
-                s.q("CREATE (:Project {id:'selftest-gf-sentinel'})")
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
+                Store(home, write=True) as s:
+            assert s.q(PROJECT_BY_ID, {"id": old}) == []
+            assert s.q("""MATCH (:Decision {id:'selftest-gf1'})-[:IN_PROJECT]->(p:Project)
+                          RETURN p.id AS id""") == [{"id": pp}]
+            assert meta(s) == [{"f": GRAPH_FORMAT}]
+            s.q("CREATE (:Project {id:'selftest-gf-sentinel'})")
         assert out.getvalue() == "", "the migration notice must never reach stdout"
         assert "re-keyed" in err.getvalue(), err.getvalue()
 
@@ -572,14 +572,13 @@ def _check_graph_format() -> None:
                 s.q("MATCH (m:Meta) SET m.graph_format=null, m.claim='other', m.claimed=$c",
                     {"c": time.time() - 10_000})
 
-            with contextlib.redirect_stderr(io.StringIO()):
-                with Store(home3, write=True) as s:
-                    assert s.q(PROJECT_BY_ID, {"id": old}) \
-                        == [], "a stale claim must not block replay"
-                    assert s.q("MATCH (p:Project {portable:$pp}) RETURN p.id AS id", {"pp": pp}) \
-                        == [{"id": pp}]
-                    row = s.q("MATCH (m:Meta) RETURN m.graph_format AS f, m.claim AS c")[0]
-                    assert row == {"f": GRAPH_FORMAT, "c": None}, row
+            with contextlib.redirect_stderr(io.StringIO()), Store(home3, write=True) as s:
+                assert s.q(PROJECT_BY_ID, {"id": old}) \
+                    == [], "a stale claim must not block replay"
+                assert s.q("MATCH (p:Project {portable:$pp}) RETURN p.id AS id", {"pp": pp}) \
+                    == [{"id": pp}]
+                row = s.q("MATCH (m:Meta) RETURN m.graph_format AS f, m.claim AS c")[0]
+                assert row == {"f": GRAPH_FORMAT, "c": None}, row
 
         with Store(home, write=True) as s:
             assert s.q("MATCH (p:Project {id:'selftest-gf-sentinel'}) RETURN p.id AS id"), \
