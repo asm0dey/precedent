@@ -29,4 +29,27 @@ untagged project, and the grader counted that tag as metadata instead of a third
 Under a literal line count the score is 25/29. `evals/` holds the prompts, assertions and a
 fixture seeder if you want to re-run or extend them.
 
+## Topic hygiene, 2026-09-30
+
+Two evals were added after a real graph turned out to file decisions under project tags
+(`framework` + `java`, which made `check` report Quarkus as diverging from a Telegram library).
+The fixture now seeds one such decision. One graded run per condition:
+
+| | With skill | Baseline |
+|---|---|---|
+| Evals 4–5 (topic hygiene) | 11/13 | 9/13 |
+| All six evals | 36/43 (84%) | not re-run for 0–3 |
+
+The baseline copied the misfiled topic into the new decision it recorded (`framework,telegram`),
+and when asked to repair it, proposed keeping bare `framework`. With the skill, both runs chose
+one specific topic (`bot-framework`) and proposed `amend --topic`, not a supersession.
+
+The with-skill losses are not about topics. Three are word limits (478/450, 324/300). The rest
+were one pattern: told a choice was "decided" or "settled", the run still drafted the record and
+asked before writing (eval 4, and the SQLite half of eval 2), because the skill said to ask before
+writing. The skill now treats an explicit settlement as the confirmation. Re-running those two
+evals once, graded by the orchestrator rather than an independent grader: eval 2 went from 6/9 to
+8/9 and eval 4 from 5/7 to 7/7. The remaining eval 2 miss is honest: the user gave no reason for
+SQLite, so the run recorded "not yet stated" and asked for it, rather than inventing one.
+
 Back to the [README](../README.md).

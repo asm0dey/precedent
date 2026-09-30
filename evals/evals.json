@@ -68,6 +68,7 @@
         "Records a deployment decision for bot-new naming systemd",
         "Captures a rationale on both recorded decisions",
         "Records the rejected alternative on the persistence decision",
+        "Every topic on the recorded decisions names the question (e.g. persistence, deployment); none is a project tag such as bot, telegram or python",
         "journal.jsonl gained exactly two entries versus the fixture",
         "Answers the handler-structure question with substantive content",
         "Bookkeeping takes up less of the answer than the handler-structure content \u2014 the reply is not dominated by graph admin",
@@ -95,6 +96,37 @@
         "States no auth detail absent from the fixture graph",
         "Connects the precedent to the new service being the same project type (backend-api), rather than presenting it as generic advice",
         "Answer is under 300 words"
+      ]
+    },
+    {
+      "id": 4,
+      "name": "record-topic-not-tag",
+      "prompt": "settled: <fixtures>/bot-new uses aiogram 3 for the telegram side, same as gamma, python-telegram-bot is out. how should I lay out the middlewares for auth and rate limiting?",
+      "expected_output": "Records one decision whose topic names the question (a bot-framework question such as telegram-bot-framework), never a project tag like telegram or python and never a bare `framework` plus a qualifier topic. Keeps bookkeeping short and answers the middleware question.",
+      "files": [],
+      "assertions_v2": [
+        "Records exactly one decision for bot-new choosing aiogram",
+        "Records python-telegram-bot as the rejected alternative",
+        "No topic on the new decision equals a project tag (bot, telegram, python)",
+        "The topic is one specific question (e.g. telegram-bot-framework or bot-framework), not a bare `framework` alongside a qualifier topic",
+        "Captures a rationale",
+        "Answers the middleware layout question with substantive content",
+        "Bookkeeping takes up less of the answer than the middleware content"
+      ]
+    },
+    {
+      "id": 5,
+      "name": "misfiled-topic-repair",
+      "prompt": "something feels off in my decision graph \u2014 `check --topic framework` for <fixtures>/bot-new felt weird. can you look at the graph's health and tell me what you'd fix?",
+      "expected_output": "Finds that bot-gamma's aiogram decision is filed under `telegram` (a project tag) and a bare `framework`, explains why that distorts check, and proposes refiling it with `amend --topic` under one specific question. Does not propose supersede, and does not write without confirmation.",
+      "files": [],
+      "assertions_v2": [
+        "Identifies bot-gamma's aiogram decision as misfiled",
+        "Explains that `telegram` is a project tag, not a question",
+        "Proposes `amend --id <id> --topic <question>` with one specific topic (e.g. telegram-bot-framework)",
+        "Does not propose `record --supersedes` for the misfiled decision",
+        "Does not write to the graph without the user confirming",
+        "Answer is under 400 words"
       ]
     }
   ]
