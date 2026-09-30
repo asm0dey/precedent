@@ -71,6 +71,11 @@ uv run <cli> record --project <path> \
   --topic "..." --chose "..." --rejected "..."
 ```
 
+`--topic` is the question the decision answers (`persistence`,
+`backend-framework`), never a project tag like `java` or `telegram-bot`,
+and never a bare noun plus a qualifier (`framework,java`). Put the
+qualifier inside one topic.
+
 Ten decisions is a lot for one project; three or four good ones with real
 rationale beat fifteen guesses. In a monorepo, record against the module the
 decision is about and put only repo-wide decisions on the root.
