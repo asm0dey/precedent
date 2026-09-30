@@ -46,6 +46,12 @@ r bot-alpha --title "Telegram Stars for payments" --scope business --topic payme
 r bot-gamma --title "Deploy as a systemd unit on the VPS" --scope process --topic deployment \
   --chose systemd --rejected docker,k8s \
   --rationale "One VPS, one process; containers add a build step for no isolation benefit here"
+# Deliberately misfiled: `telegram` is a project tag, and `framework` is the
+# bare noun it was meant to qualify. The misfiled-topic-repair eval expects
+# this to be found and refiled with `amend --topic`, not superseded.
+r bot-gamma --title "aiogram as the bot framework" --scope tooling --topic framework,telegram \
+  --chose aiogram --rejected python-telegram-bot \
+  --rationale "Router-based handlers and native async; python-telegram-bot's callback nesting is why gamma was rewritten"
 for a in api-one api-two; do
   r "$a" --title "Postgres via SQLAlchemy ($a)" --scope architecture --topic persistence \
     --chose postgres --rejected mongo \

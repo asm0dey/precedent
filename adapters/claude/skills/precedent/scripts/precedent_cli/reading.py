@@ -3,7 +3,7 @@ from __future__ import annotations
 import pathlib
 
 from .core import Store, slug
-from .projects import classify_prompt, contained, effective_tags, enclosing, neighbours, project_info, settle, tags_of, topic_vocabulary
+from .projects import classify_prompt, contained, effective_tags, enclosing, neighbours, print_tag_topics, project_info, settle, tag_topics, tags_of, topic_vocabulary
 
 
 # ------------------------------------------------------------------------ reading
@@ -164,6 +164,12 @@ def cmd_brief(a, s: Store) -> None:
 
     _print_peer_precedent(s, kin)
     _print_lessons_and_principles(s)
+    # Graph-wide on purpose: the SessionStart hook is the one place every
+    # user's graph gets looked at, and a misfiled topic in any project
+    # distorts `check` in every project that shares it.
+    misfiled = tag_topics(s)
+    if misfiled:
+        print_tag_topics(misfiled)
 
 
 def _print_prior(rows: list[dict]) -> None:

@@ -456,7 +456,8 @@ def _check_lock_modes() -> None:
     # first `amend --<new-field>` a user tries.
     amend_dests = {act.dest for act in subparsers[0].choices["amend"]._actions
                    if act.dest not in ("help", "id")}
-    assert amend_dests == set(AMENDABLE), (
+    # `topic` rides beside AMENDABLE: it rewrites ABOUT edges, not a property.
+    assert amend_dests == {*AMENDABLE, "topic"}, (
         "AMENDABLE and the `amend` subparser's --flags have drifted apart — "
         f"got {amend_dests}, expected {set(AMENDABLE)}. AMENDABLE is meant to "
         "be the single whitelist: update the matching add_argument calls in "

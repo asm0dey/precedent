@@ -5,7 +5,7 @@ import pathlib
 
 from ..core import SCHEMA, Store, today
 from ..maintain import cmd_maintain, contradictions_in, liveness
-from ..projects import attach_tags, contained, effective_tags, enclosing, neighbours, normalised, project_info, tags_of, topic_vocabulary, upsert_project
+from ..projects import tag_topics, attach_tags, contained, effective_tags, enclosing, neighbours, normalised, project_info, tags_of, topic_vocabulary, upsert_project
 from ..reading import cmd_check, worth_backfilling
 from ..replay import replay_entry
 from .checks_identity import _git_repo
@@ -228,10 +228,13 @@ def _check_amend(s: Store) -> None:
     d = {"id": "selftest-amend", "title": "narrow title", "statement": "s",
          "rationale": "r", "scope": "architecture", "created": today(),
          "project_id": "selftest-amend-proj", "project_name": "selftest",
-         "tags": [], "topics": ["selftest-amend-topic"],
+         "tags": ["selftest-amend-topic"], "topics": ["selftest-amend-topic"],
          "chose": ["selftest-amend-opt"], "rejected": [], "supersedes": []}
     try:
         write_decision(s, d)
+        # A topic spelled like a tag is what the SessionStart brief flags.
+        assert "selftest-amend" in [r["id"] for r in tag_topics(s)], \
+            "a topic that is also a tag must be reported"
         apply_amend(s, {"id": "selftest-amend", "title": WIDER_TITLE})
         assert s.q("""MATCH (d:Decision {id:'selftest-amend'})
                       RETURN d.title AS t, d.statement AS st,
@@ -267,9 +270,28 @@ def _check_amend(s: Store) -> None:
         apply_amend(s, {"id": "selftest-amend"})
         assert s.q("""MATCH (d:Decision {id:'selftest-amend'})
                       RETURN d.title AS t""") == [{"t": WIDER_TITLE}]
+
+        # Refiling replaces the topic set — the misfiled one must stop
+        # matching, or `check` keeps grouping the decision under a project
+        # tag — and it must survive a rebuild like every other amendment.
+        replay_entry(s, {"op": "refile", "id": "selftest-amend",
+                         "topics": ["selftest-amend-refiled"], "v": SCHEMA})
+        assert s.q("""MATCH (:Decision {id:'selftest-amend'})-[:ABOUT]->(t:Topic)
+                      RETURN t.name AS n""") == [{"n": "selftest-amend-refiled"}]
+        assert s.q("""MATCH (:Decision {id:'selftest-amend'})-[:CHOSE]->(o:Option)
+                      RETURN o.name AS n""") == [{"n": "selftest-amend-opt"}], \
+            "refiling must not touch what was decided"
+        assert "selftest-amend" not in [r["id"] for r in tag_topics(s)], \
+            "a refiled decision must stop being reported"
+        replay_entry(s, {"op": "refile", "id": "selftest-amend-ghost",
+                         "topics": ["selftest-amend-ghost-topic"], "v": SCHEMA})
+        assert s.q("MATCH (d:Decision {id:'selftest-amend-ghost'}) RETURN d.id AS id") \
+            == [], "refiling must never create a Decision"
     finally:
         s.q("MATCH (n) WHERE n.id STARTS WITH 'selftest-amend' DETACH DELETE n")
-        for name in ("selftest-amend-topic", "selftest-amend-opt"):
+        s.q("MATCH (g:Tag {name:'selftest-amend-topic'}) DETACH DELETE g")
+        for name in ("selftest-amend-topic", "selftest-amend-opt",
+                     "selftest-amend-refiled", "selftest-amend-ghost-topic"):
             s.q(DELETE_ORPHAN_TOPIC_OPTION,
                 {"name": name})
 

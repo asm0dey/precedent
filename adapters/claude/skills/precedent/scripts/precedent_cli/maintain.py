@@ -6,7 +6,7 @@ import re
 import sys
 
 from .core import Store, csv
-from .projects import attach_tags, fold_project, merge_target, normalised, paths_of, portable_id, project_info, settle, tags_of, upsert_project, vocabulary
+from .projects import print_tag_topics, tag_topics, attach_tags, fold_project, merge_target, normalised, paths_of, portable_id, project_info, settle, tags_of, upsert_project, vocabulary
 
 NONE_LINE = "  none"
 
@@ -324,7 +324,8 @@ def _report_contradictions(s: Store) -> None:
     clashes = contradictions_in(s)
     print(f"== contradictions: same project, same topic, two live answers ({len(clashes)}) ==")
     for r in clashes:
-        print(f"  {r['project']}/{r['topic']} — supersede one:")
+        print(f"  {r['project']}/{r['topic']} — supersede one, or refile with"
+              " `amend --topic` if they answer different questions:")
         for did, opts in sorted(r["decisions"].items()):
             print(f"     {','.join(opts)}  #{did}")
 
@@ -469,6 +470,7 @@ def _report_counts(s: Store) -> None:
 
 def cmd_maintain(a, s: Store) -> None:
     _report_contradictions(s)
+    print_tag_topics(tag_topics(s))
     _report_tags(s)
     _report_leftovers(s)
     _report_untagged(s)

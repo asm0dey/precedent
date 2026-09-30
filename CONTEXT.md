@@ -33,7 +33,7 @@ _Avoid_: update, overwrite, revision
 A restatement of how a Decision was *described*, leaving what was decided
 untouched. Distinct from Supersession, which records that the decision itself
 changed: an amendment asserts no history, because none happened. The id
-survives it.
+survives it. Refiling a decision under the right Topic is an amendment.
 _Avoid_: edit, fix, correction, revision
 
 **Regret**:
@@ -111,7 +111,12 @@ inferred from dependencies.
 _Avoid_: type, kind, classification, category
 
 **Topic**:
-The question a decision answers — `persistence`, `auth`, `ingest`.
+The question a decision answers — `persistence`, `auth`, `ingest`. Never a
+Tag: `java` or `telegram` describes the project, not the question. When a
+question needs a qualifier to be unambiguous, the qualifier goes inside one
+topic (`backend-framework`), never beside a bare noun as a second one
+(`framework` + `java`) — topics match independently, so the qualifier narrows
+nothing.
 _Avoid_: subject, area, domain
 
 **Option**:
