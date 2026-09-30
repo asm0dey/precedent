@@ -8,6 +8,15 @@ from .projects import attach_tags, project_info, settle, upsert_project
 
 # ------------------------------------------------------------------------- writing
 
+def link_topics(s: Store, label: str, node_id: str, topics: list[str]) -> None:
+    """File a Decision or Principle under each topic. `label` is one of those
+    two literals, never user input, which is what makes interpolating it safe."""
+    for topic in topics:
+        s.q("MERGE (t:Topic {name:$n})", {"n": topic})
+        s.q(f"""MATCH (x:{label} {{id:$id}}),(t:Topic {{name:$n}})
+                MERGE (x)-[:ABOUT]->(t)""", {"id": node_id, "n": topic})
+
+
 def write_decision(s: Store, d: dict) -> str:
     # Everything below keys off the RESOLVED id, never d["project_id"]: on a
     # second machine the two differ, and a tag attached to the unresolved path
@@ -31,10 +40,7 @@ def write_decision(s: Store, d: dict) -> str:
            MERGE (n)-[:IN_PROJECT]->(p)""",
         {"id": d["id"], "project_id": pid})
 
-    for topic in d.get("topics", []):
-        s.q("MERGE (t:Topic {name:$n})", {"n": topic})
-        s.q("""MATCH (n:Decision {id:$id}),(t:Topic {name:$n})
-               MERGE (n)-[:ABOUT]->(t)""", {"id": d["id"], "n": topic})
+    link_topics(s, "Decision", d["id"], d.get("topics", []))
     for rel, names in (("CHOSE", d.get("chose", [])),
                        ("REJECTED", d.get("rejected", []))):
         for name in names:
@@ -275,10 +281,7 @@ def apply_refile(s: Store, e: dict) -> None:
     if not s.q("MATCH (d:Decision {id:$id}) RETURN d.id AS id", {"id": e["id"]}):
         return
     s.q("MATCH (:Decision {id:$id})-[r:ABOUT]->(:Topic) DELETE r", {"id": e["id"]})
-    for topic in e["topics"]:
-        s.q("MERGE (t:Topic {name:$n})", {"n": topic})
-        s.q("""MATCH (d:Decision {id:$id}),(t:Topic {name:$n})
-               MERGE (d)-[:ABOUT]->(t)""", {"id": e["id"], "n": topic})
+    link_topics(s, "Decision", e["id"], e["topics"])
 
 
 def cmd_principle(a, s: Store) -> None:
@@ -287,10 +290,7 @@ def cmd_principle(a, s: Store) -> None:
     s.log("principle", p)
     s.q("""MERGE (pr:Principle {id:$id}) SET pr.statement=$statement, pr.created=$created""",
         {**p, "created": today()})
-    for topic in p["topics"]:
-        s.q("MERGE (t:Topic {name:$n})", {"n": topic})
-        s.q("""MATCH (pr:Principle {id:$id}),(t:Topic {name:$n})
-               MERGE (pr)-[:ABOUT]->(t)""", {"id": a.id, "n": topic})
+    link_topics(s, "Principle", a.id, p["topics"])
     for did in p["derived_from"]:
         s.q("""MATCH (pr:Principle {id:$id}),(d:Decision {id:$did})
                MERGE (pr)-[:DERIVED_FROM]->(d)""", {"id": a.id, "did": did})
