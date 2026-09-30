@@ -100,6 +100,12 @@ def cmd_record(a, s: Store) -> None:
           f"  tags: {', '.join(info['tags']) or 'none'}")
     if not a.rationale:
         print("  note: no --rationale. Future you will want the why, not the what.")
+    tagged = [r["n"] for r in s.q(
+        "MATCH (t:Tag) WHERE t.name IN $ts RETURN t.name AS n", {"ts": d["topics"]})]
+    if tagged:
+        print(f"  note: topic {', '.join(tagged)} is also a project tag. A topic names the"
+              " question, not the project — refile with: precedent.py amend"
+              f" --id {d['id']} --topic <question>")
     if not info["tags"]:
         print("  note: this project has no tags, so the decision will not surface"
               " as precedent anywhere. Tag it: precedent.py tag --project . --add <tags>")
@@ -116,7 +122,9 @@ def cmd_amend(a, s: Store) -> None:
     has no such history, and superseding one asserts a change that never
     happened — in the field `check` prints first and quotes back.
 
-    Only the words change; see AMENDABLE for why that is the line.
+    Only the words change; see AMENDABLE for why that is the line. `--topic`
+    is the one non-word: it refiles the decision under the question it
+    actually answers, and leaves what was chosen untouched.
 
     The id never changes, including the stale title slug inside it. The id is
     identity and the slug within it is an accident of how it was minted —
@@ -139,14 +147,27 @@ def cmd_amend(a, s: Store) -> None:
         raise SystemExit(2)
     was = rows[0]
     fields = {k: getattr(a, k) for k in AMENDABLE if getattr(a, k)}
+    topics = [t.lower() for t in csv(a.topic)]
+    if topics:
+        was["topics"] = ", ".join(sorted(r["n"] for r in s.q(
+            "MATCH (:Decision {id:$id})-[:ABOUT]->(t:Topic) RETURN t.name AS n",
+            {"id": a.id})))
+        fields["topics"] = topics
     if not fields:
         print("nothing to amend — pass at least one of "
-              + ", ".join(f"--{k}" for k in AMENDABLE))
+              + ", ".join(f"--{k}" for k in (*AMENDABLE, "topic")))
         raise SystemExit(2)
 
-    payload = {"id": a.id, **fields}
-    s.log("amend", payload)
-    apply_amend(s, payload)
+    # Refiling is its own op, not a key on "amend": a CLI that predates it
+    # would replay an "amend" line, ignore the key, and silently put the
+    # decision back under the wrong topic. An unknown op fails loudly instead.
+    words = {k: v for k, v in fields.items() if k != "topics"}
+    if words:
+        s.log("amend", {"id": a.id, **words})
+        apply_amend(s, {"id": a.id, **words})
+    if topics:
+        s.log("refile", {"id": a.id, "topics": topics})
+        apply_refile(s, {"id": a.id, "topics": topics})
 
     print(f"amended {a.id}")
     # Both halves, because the user cannot see the graph and this is a write
@@ -155,7 +176,7 @@ def cmd_amend(a, s: Store) -> None:
     for k, new in fields.items():
         print(f"  {k}")
         print(f"    was: {was[k] or '-'}")
-        print(f"    now: {new}")
+        print(f"    now: {', '.join(new) if k == 'topics' else new}")
     # cmd_record sets statement to `a.statement or a.title`, so a decision
     # recorded without an explicit --statement carries the title verbatim in
     # both fields. When --title alone is amended, that old statement survives
@@ -243,6 +264,21 @@ def apply_amend(s: Store, e: dict) -> None:
         return
     clause = ", ".join(f"d.{k}=${k}" for k in fields)
     s.q(f"MATCH (d:Decision {{id:$id}}) SET {clause}", {"id": e["id"], **fields})
+
+
+def apply_refile(s: Store, e: dict) -> None:
+    """Replace the topic set of a decision filed under the wrong question.
+
+    MATCH first, as in apply_amend: refiling a decision that is not there
+    must create nothing. The old Topic nodes stay; `maintain` owns orphans.
+    """
+    if not s.q("MATCH (d:Decision {id:$id}) RETURN d.id AS id", {"id": e["id"]}):
+        return
+    s.q("MATCH (:Decision {id:$id})-[r:ABOUT]->(:Topic) DELETE r", {"id": e["id"]})
+    for topic in e["topics"]:
+        s.q("MERGE (t:Topic {name:$n})", {"n": topic})
+        s.q("""MATCH (d:Decision {id:$id}),(t:Topic {name:$n})
+               MERGE (d)-[:ABOUT]->(t)""", {"id": e["id"], "n": topic})
 
 
 def cmd_principle(a, s: Store) -> None:

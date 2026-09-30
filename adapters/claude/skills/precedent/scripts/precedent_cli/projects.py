@@ -304,6 +304,33 @@ def vocabulary(s: "Store") -> list[dict]:
                   ORDER BY projects DESC, tag""")
 
 
+def tag_topics(s: "Store") -> list[dict]:
+    """Live decisions filed under a topic that is also a project tag.
+
+    A tag says what a project is, a topic which question a decision answers.
+    A topic spelled like a tag (`java`, `telegram-bot`) groups unrelated
+    choices as one question, and `check` then reports divergence between
+    them. Exact equality only (docs/adr/0001): the model judges the rest.
+    """
+    return s.q("""MATCH (d:Decision {status:'active'})-[:ABOUT]->(t:Topic),
+                        (d)-[:IN_PROJECT]->(p:Project)
+                  WHERE EXISTS { MATCH (:Tag {name:t.name}) }
+                  MATCH (d)-[:ABOUT]->(every:Topic)
+                  RETURN d.id AS id, d.title AS title, p.name AS project,
+                         collect(DISTINCT t.name) AS tags,
+                         collect(DISTINCT every.name) AS topics
+                  ORDER BY project, id""")
+
+
+def print_tag_topics(rows: list[dict]) -> None:
+    print(f"\n== decisions filed under a project tag instead of a question ({len(rows)}) ==")
+    print("  refile each under the question it answers; qualifiers go inside one topic:")
+    for r in rows:
+        print(f"  {r['project']}: {r['title']}  topics: {','.join(sorted(r['topics']))}"
+              f"  (tag: {','.join(r['tags'])})")
+        print(f"     precedent.py amend --id {r['id']} --topic <question>")
+
+
 def topic_vocabulary(s: "Store") -> list[dict]:
     """Topics already in use, commonest first — the menu `check` picks from.
 

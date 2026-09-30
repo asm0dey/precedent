@@ -57,6 +57,9 @@ def build_parser() -> argparse.ArgumentParser:
     am.add_argument("--title", default="")
     am.add_argument("--statement", default="")
     am.add_argument("--rationale", default="")
+    am.add_argument("--topic", default="",
+                    help="comma-separated; REPLACES the whole topic set. For a decision "
+                         "filed under the wrong question, e.g. a project tag used as a topic")
     am.set_defaults(writes=True, fn=cmd_amend)
 
     b = sub.add_parser("brief", help="project type, decisions here, precedent from similar projects")

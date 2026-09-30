@@ -27,8 +27,9 @@ query that answers "what is true now" — superseded decisions are kept
 deliberately and will otherwise pollute the result.
 
 `title`, `statement` and `rationale` are the only properties `amend` rewrites;
-`status`, `scope` and `created` are not amendable, and neither are any of a
-decision's edges.
+`status`, `scope` and `created` are not amendable. The only edges it rewrites
+are `ABOUT`, through `amend --topic` (journaled as `refile`); `CHOSE`,
+`REJECTED` and `IN_PROJECT` are what was decided and never move.
 
 A project's kind is a SET of `Tag` nodes, not a property. Tags are free-form
 strings supplied by the agent, never inferred from dependencies, and are written
@@ -148,7 +149,7 @@ that is what keeps every line written before versioning replayable — and
 REFUSES a line whose `v` exceeds `SCHEMA`, stopping the rebuild rather than
 guessing at keys it does not know.
 
-`op` is `record`, `amend`, `project_tags`, `project_portable`, `project_merge`,
+`op` is `record`, `amend`, `refile`, `project_tags`, `project_portable`, `project_merge`,
 `tag_merge`, `regret` or `principle`; the pre-tag `project_type` and the retired `tags_distinct` are still
 replayed so old journals keep working. The list is exhaustive: `replay_entry`
 raises on an op it does not know rather than counting a silent no-op as a
@@ -199,9 +200,25 @@ words — and carries `id` plus any subset of `title`, `statement` and
 ```
 
 A key that is absent is unchanged, never cleared, so an amendment to a title
-cannot blank a rationale. Nothing else on the decision is amendable: topics,
-options, scope and project are *what was decided*, and changing one of those
-is a different decision, recorded with `record --supersedes`.
+cannot blank a rationale. Options, scope and project are *what was decided*,
+and changing one of those is a different decision, recorded with
+`record --supersedes`.
+
+`refile` replaces a decision's topic set — the question it is filed under —
+and carries `id` plus the complete new `topics` list. `amend --topic` writes
+it. It exists for a decision filed under a project tag (`java`, `telegram`)
+or under a bare noun that a tag was meant to qualify (`framework` + `java`),
+which makes `check` group unrelated choices as one question:
+
+```json
+{"ts":"2026-09-30T12:00:00","op":"refile","id":"quarkus-as-the-application-framework-1789064267",
+ "topics":["backend-framework"],"v":1}
+```
+
+It replays as `MATCH`, drop every `ABOUT` edge, then add the listed ones, and
+creates nothing when the decision is missing. It is a separate op rather than
+a key on `amend` so that an older precedent raises on it instead of replaying
+the `amend` half and silently leaving the old topics in place.
 
 It replays as `MATCH ... SET` — never a `MERGE`: an amendment must not
 fabricate a decision out of a rewording when the `record` line above it was

@@ -5,7 +5,7 @@ import json
 from .core import GRAPH_FORMAT, JournalTooNew, SCHEMA, Store
 from .maintain import apply_tag_merge
 from .projects import attach_tags, fold_project, upsert_project
-from .writing import apply_amend, apply_regret, write_decision
+from .writing import apply_amend, apply_refile, apply_regret, write_decision
 
 
 def mark_graph_format(s: "Store") -> None:
@@ -169,6 +169,7 @@ _REPLAY_OPS = {
     "project_merge": _replay_project_merge,
     "regret": apply_regret,
     "amend": apply_amend,
+    "refile": apply_refile,
     "principle": _replay_principle,
 }
 
