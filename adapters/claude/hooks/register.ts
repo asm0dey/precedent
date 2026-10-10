@@ -14,7 +14,16 @@ const CLI = 'adapters/claude/skills/precedent/scripts/precedent.py'
 
 // Literal targets only: no $, backticks, parens or quotes, so nothing is evaluated.
 const CD_TARGET = /(?:^|[\s;&|(])(?:cd|pushd)\s+(?:--\s+)?([^\s;&|()$`'"]+)/g
-const MANIFEST = /(^|[\\/])(package\.json|pyproject\.toml|requirements[^\\/]*\.txt|pom\.xml|build\.gradle(\.kts)?|libs\.versions\.toml|Cargo\.toml|go\.mod|Gemfile|composer\.json|[^\\/]+\.csproj|dependabot\.ya?ml|renovate\.json5?)$/
+const MANIFESTS = new Set(['package.json', 'pyproject.toml', 'pom.xml', 'build.gradle', 'build.gradle.kts',
+  'libs.versions.toml', 'Cargo.toml', 'go.mod', 'Gemfile', 'composer.json',
+  'dependabot.yml', 'dependabot.yaml', 'renovate.json', 'renovate.json5'])
+
+const basename = (path: string) => path.split(/[\\/]/).at(-1) ?? ''
+
+function isManifest(path: string) {
+  const name = basename(path)
+  return MANIFESTS.has(name) || name.endsWith('.csproj') || (name.startsWith('requirements') && name.endsWith('.txt'))
+}
 
 const REJECTED = `MATCH (d:Decision)-[:REJECTED]->(o:Option), (d)-[:ABOUT]->(t:Topic), (d)-[:IN_PROJECT]->(p:Project)
   WHERE d.status='active' RETURN o.name AS opt, t.name AS topic, p.name AS project, d.title AS title`
@@ -55,9 +64,9 @@ async function landedIn($: EngineInterface, command: string) {
   const target = [...command.matchAll(CD_TARGET)].at(-1)?.[1]
   if (target === undefined) return undefined
   const home = (await $.env.get('HOME')) ?? (await $.env.get('USERPROFILE')) ?? ''
-  const path = /^~([\\/]|$)/.test(target) ? home + target.slice(1)
-    : /^([\\/]|[A-Za-z]:[\\/])/.test(target) ? target
-    : `${await $.session.cwd()}/${target}`
+  let path = `${await $.session.cwd()}/${target}`
+  if (/^~([\\/]|$)/.test(target)) path = home + target.slice(1)
+  else if (/^([\\/]|[A-Za-z]:[\\/])/.test(target)) path = target
   try {
     const st = await $.fs.stat(path, { resolve: true })
     return st.kind === 'dir' ? st.realPath : undefined
@@ -92,8 +101,10 @@ async function warnings($: EngineInterface, text: string) {
   if (!text.trim()) return []
   const [rejected, regretted] = await Promise.all([rows($, REJECTED), rows($, REGRETTED)])
   return [
-    ...regretted.filter(r => mentions(text, r.opt)).map(r =>
-      `REGRET '${r.opt}' (${r.topic}): ${r.why}${r.instead ? ` — now preferred: ${r.instead}` : ''}`),
+    ...regretted.filter(r => mentions(text, r.opt)).map(r => {
+      const instead = r.instead ? ' — now preferred: ' + r.instead : ''
+      return `REGRET '${r.opt}' (${r.topic}): ${r.why}${instead}`
+    }),
     ...rejected.filter(r => mentions(text, r.opt)).map(r =>
       `REJECTED '${r.opt}' (${r.topic}) in ${r.project}: ${r.title}`),
   ]
@@ -134,7 +145,7 @@ export const register: Register = on => {
 
   on('tool.call', { tool: 'Edit' }, async ($, e, next) => {
     const ran = await next(e)
-    if (ran.deny !== undefined || ran.isError || !MANIFEST.test(e.file_path)) return ran
+    if (ran.deny !== undefined || ran.isError || !isManifest(e.file_path)) return ran
     const found = await warnings($, added(e.old_string, e.new_string))
     if (found.length === 0) return ran
     $.ui.toast(`precedent: ${found.length} past rejection(s) in ${e.file_path}`)
@@ -142,13 +153,13 @@ export const register: Register = on => {
   })
 
   on('tool.call', { tool: 'Write' }, async ($, e, next) => {
-    if (!MANIFEST.test(e.file_path)) return next(e)
+    if (!isManifest(e.file_path)) return next(e)
     const existed = await $.fs.exists(e.file_path)
     const before = existed ? String(await $.fs.read(e.file_path)) : ''
     const ran = await next(e)
     if (ran.deny !== undefined || ran.isError) return ran
     // Creating dependabot.yml is the choice itself, whatever its content says.
-    const name = existed ? '' : `${e.file_path.split(/[\\/]/).at(-1)}\n`
+    const name = existed ? '' : basename(e.file_path) + '\n'
     const found = await warnings($, name + added(before, e.content))
     if (found.length === 0) return ran
     $.ui.toast(`precedent: ${found.length} past rejection(s) in ${e.file_path}`)
