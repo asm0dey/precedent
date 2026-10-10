@@ -117,7 +117,8 @@ def cmd_standing_orders(a) -> None:
 
 def cmd_cypher(a, s: Store) -> None:
     for row in s.q(a.query, json.loads(a.params) if a.params else None):
-        print(row)
+        # One JSON object per line, so hooks and scripts can parse it.
+        print(json.dumps(row, default=str, ensure_ascii=False))
 
 
 def export_to(s: Store, out: pathlib.Path) -> pathlib.Path:
