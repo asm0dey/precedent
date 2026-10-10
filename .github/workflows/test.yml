@@ -110,3 +110,12 @@ jobs:
         # (refresh with `uv lock --script scripts/gen-plugin-json.py`), and
         # --no-build refuses to run a setup script from a source distribution.
         run: uv run --locked --no-build scripts/gen-plugin-json.py --check
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2.2.0
+      - name: the Claude Code plugin and its hooks module validate
+        # Reads hooks/register.ts the way the engine will and fails on what it
+        # would refuse (an unknown event, a malformed $ call). Static only:
+        # `claude plugin test` is server-gated off outside interactive sessions.
+        # Pinned to a build that understands `modules`; older ones skip it.
+        env:
+          CLAUDE_CONFIG_DIR: ${{ runner.temp }}/claude-config
+        run: bunx -p @anthropic-ai/claude-code@2.1.287 claude plugin validate .claude-plugin/plugin.json
