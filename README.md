@@ -189,6 +189,12 @@ knowing what you decided here and in comparable projects. It stays quiet where t
 nothing to say, so empty directories cost nothing. ACR wires it for you; the plugin ships it in
 `hooks.json`; the symlink route needs a few lines in `~/.claude/settings.json`.
 
+In Claude Code builds with function hooks (mods), the plugin also loads
+`adapters/claude/hooks/register.ts`, which turns two standing orders from reminders into
+behaviour: a Bash `cd` into another project attaches that project's brief, and a manifest edit
+that adds an option you recorded as rejected or regretted (H2, Dependabot, ...) attaches those
+records for the model to judge. Elsewhere it does not load and the skill works as before.
+
 That wiring, the `[PRECEDENT]` statusline badge, the Windows PowerShell variants, where the store
 lives and how to move or sync it, and the CLI underneath all of it:
 [docs/setup.md](docs/setup.md).
