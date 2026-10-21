@@ -69,7 +69,9 @@ Distinct from a Divergence, which is only a departure from the majority.
 
 **Principle**:
 A standing rule promoted from a choice repeated often enough to stop being a
-per-project decision.
+per-project decision, or, recorded with no topic, a global instruction the user
+adds about how the agent works. Delivered in the Standing orders. A retired
+principle keeps its node and its reason, and stops being delivered.
 
 ### Projects and how they are compared
 
@@ -154,4 +156,5 @@ the standing orders are worded for that harness.
 
 **Standing orders**:
 The instructions an agent is given at session start about when to consult and
-when to record. Authored once in Core; each Adapter renders it.
+when to record, followed by every active Principle. Authored once in Core; each
+Adapter renders it, in every directory, whether or not there is a brief.
