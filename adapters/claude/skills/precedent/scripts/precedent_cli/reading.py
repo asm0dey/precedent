@@ -325,6 +325,7 @@ def cmd_check(a, s: Store) -> None:
     # after the empty-topic return below, it answered only the topics that
     # least needed it.
     governing = s.q("""MATCH (pr:Principle)-[:ABOUT]->(:Topic {name:$t})
+                       WHERE pr.retired IS NULL
                        RETURN pr.id AS id, pr.statement AS stmt""", {"t": topic})
     if not rows:
         # "nothing recorded" is false when a principle is recorded under it.

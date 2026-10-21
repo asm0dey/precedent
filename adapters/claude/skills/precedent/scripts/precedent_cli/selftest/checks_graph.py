@@ -501,7 +501,8 @@ def _check_verdicts(s: Store) -> None:
         with contextlib.redirect_stdout(io.StringIO()):
             cmd_principle(_argparse.Namespace(
                 id="selftest-p2", statement="selftest-p2 statement",
-                derived_from="", topic="selftest-p2-topic"), ps)
+                derived_from="", topic="selftest-p2-topic",
+                retire=False, because=""), ps)
         written = ps.q("""MATCH (pr:Principle {id:'selftest-p2'})
                                 -[:ABOUT]->(t:Topic {name:'selftest-p2-topic'})
                           RETURN pr.id AS id""")
@@ -527,6 +528,62 @@ def _check_verdicts(s: Store) -> None:
                                  -[:ABOUT]->(t:Topic {name:'selftest-p2-topic'})
                            RETURN pr.id AS id""")
         assert replayed, "replay_entry must recreate the ABOUT edge from topics"
+
+
+
+def _check_principle_retire() -> None:
+    """A principle retired with a reason stops governing, and coming back is
+    re-recording it. Runs on its own throwaway store: cmd_principle journals.
+    """
+    import argparse as _argparse
+    import contextlib
+    import io
+    import tempfile
+
+    def principle(ps, **kw):
+        args = {"id": "selftest-retire", "statement": "", "derived_from": "",
+                "topic": "selftest-retire-topic", "retire": False, "because": ""}
+        with contextlib.redirect_stdout(io.StringIO()):
+            cmd_principle(_argparse.Namespace(**{**args, **kw}), ps)
+
+    def state(ps):
+        return ps.q("""MATCH (pr:Principle {id:'selftest-retire'})
+                       RETURN pr.retired AS r, pr.retired_because AS b""")[0]
+
+    def governs(ps, here):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cmd_check(_argparse.Namespace(topic="selftest-retire-topic",
+                                          chose="", project=here), ps)
+        return "PRINCIPLE in play" in out.getvalue()
+
+    with tempfile.TemporaryDirectory() as tmp_home, \
+            Store(pathlib.Path(tmp_home), write=True) as ps:
+        principle(ps, statement="x")
+        assert state(ps)["r"] is None, "a fresh principle is active"
+        assert governs(ps, tmp_home)
+
+        principle(ps, retire=True, because="obsolete")
+        st = state(ps)
+        assert st["r"] is not None and st["b"] == "obsolete", st
+        assert not governs(ps, tmp_home), "a retired principle must not reach check"
+
+        _expect_exit(principle, ps, retire=True, because="  ",
+                     message="--retire without --because must be refused")
+        exc = _expect_exit(principle, ps, id="selftest-retire-missing", retire=True,
+                           because="typo", message="retiring an unknown id must be refused")
+        assert "selftest-retire-missing" in str(exc), exc
+        assert not ps.q("MATCH (pr:Principle {id:'selftest-retire-missing'}) RETURN pr.id AS id")
+        _expect_exit(principle, ps, statement="",
+                     message="recording without --statement must be refused")
+
+        replay_entry(ps, {"op": "principle_retire", "id": "selftest-retire",
+                          "because": "again", "ts": today()})
+        assert state(ps)["b"] == "again", "replay must apply a retirement"
+
+        principle(ps, statement="y")
+        assert state(ps) == {"r": None, "b": None}, "re-recording must reactivate"
+        assert governs(ps, tmp_home)
 
 
 def _check_maintain(s: Store) -> None:

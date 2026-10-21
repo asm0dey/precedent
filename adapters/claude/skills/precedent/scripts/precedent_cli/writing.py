@@ -284,11 +284,32 @@ def apply_refile(s: Store, e: dict) -> None:
     link_topics(s, "Decision", e["id"], e["topics"])
 
 
+def apply_principle_retire(s: Store, e: dict) -> None:
+    s.q("""MATCH (pr:Principle {id:$id})
+           SET pr.retired=$date, pr.retired_because=$because""", e)
+
+
 def cmd_principle(a, s: Store) -> None:
+    if a.retire:
+        # The reason is the point: when the pattern comes back, it is the only
+        # way to tell a principle dropped on purpose from one lost by accident.
+        if not a.because.strip():
+            raise SystemExit("error: --retire needs --because, the reason it no longer holds")
+        if not s.q("MATCH (pr:Principle {id:$id}) RETURN pr.id AS id", {"id": a.id}):
+            raise SystemExit(f"error: no principle with id {a.id}")
+        e = {"id": a.id, "because": a.because}
+        s.log("principle_retire", e)
+        apply_principle_retire(s, {**e, "date": today()})
+        print(f"principle {a.id} retired: {a.because}")
+        return
+    if not a.statement.strip():
+        raise SystemExit("error: --statement is required unless --retire")
     p = {"id": a.id, "statement": a.statement, "derived_from": csv(a.derived_from),
          "topics": [t.lower() for t in csv(a.topic)]}
     s.log("principle", p)
-    s.q("""MERGE (pr:Principle {id:$id}) SET pr.statement=$statement, pr.created=$created""",
+    s.q("""MERGE (pr:Principle {id:$id})
+           SET pr.statement=$statement, pr.created=$created,
+               pr.retired=null, pr.retired_because=null""",
         {**p, "created": today()})
     link_topics(s, "Principle", a.id, p["topics"])
     for did in p["derived_from"]:

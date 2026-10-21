@@ -5,7 +5,7 @@ import json
 from .core import GRAPH_FORMAT, JournalTooNew, SCHEMA, Store
 from .maintain import apply_tag_merge
 from .projects import attach_tags, fold_project, upsert_project
-from .writing import apply_amend, apply_refile, apply_regret, link_topics, write_decision
+from .writing import apply_amend, apply_principle_retire, apply_refile, apply_regret, link_topics, write_decision
 
 
 def mark_graph_format(s: "Store") -> None:
@@ -149,11 +149,18 @@ def _replay_project_merge(s: Store, e: dict) -> None:
 
 def _replay_principle(s: Store, e: dict) -> None:
     s.q("""MERGE (pr:Principle {id:$id})
-           SET pr.statement=$statement, pr.created=$ts""", e)
+           SET pr.statement=$statement, pr.created=$ts,
+               pr.retired=null, pr.retired_because=null""", e)
     link_topics(s, "Principle", e["id"], e.get("topics", []))
     for did in e.get("derived_from", []):
         s.q("""MATCH (pr:Principle {id:$id}),(d:Decision {id:$did})
                MERGE (pr)-[:DERIVED_FROM]->(d)""", {"id": e["id"], "did": did})
+
+
+def _replay_principle_retire(s: Store, e: dict) -> None:
+    # The journal line's timestamp is the retirement date, as `ts` is the
+    # creation date in _replay_principle.
+    apply_principle_retire(s, {"id": e["id"], "because": e["because"], "date": e["ts"][:10]})
 
 
 _REPLAY_OPS = {
@@ -168,6 +175,7 @@ _REPLAY_OPS = {
     "amend": apply_amend,
     "refile": apply_refile,
     "principle": _replay_principle,
+    "principle_retire": _replay_principle_retire,
 }
 
 
