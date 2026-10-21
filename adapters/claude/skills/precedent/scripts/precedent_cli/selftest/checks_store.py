@@ -701,6 +701,14 @@ def _check_standing_orders_principles() -> None:
         (pointed / POINTER).write_text("", encoding="utf-8")
         assert "principles could not be read:" in orders(pointed), orders(pointed)
 
+    # A session the hook never reached learns of the orders only from the
+    # skill description, the one part of a skill that is always in context.
+    skill = (CLI.parent.parent / "SKILL.md").read_text(encoding="utf-8")
+    desc = next(line for line in skill.splitlines() if line.startswith("description:"))
+    desc = desc.removeprefix("description:").strip()
+    assert "standing-orders" in desc, "the description must tell hook-less sessions to run it"
+    assert len(desc) <= 1024, f"skill descriptions are capped at 1024 chars, this is {len(desc)}"
+
 
 def _check_entry_point() -> None:
     """The entry script imports its package from any cwd and through a symlink.
