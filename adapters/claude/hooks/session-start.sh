@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # SessionStart hook: prime the session with the user's recorded decisions.
-# Silent unless the graph has something relevant — an empty brief is noise.
+# The brief only when the graph has something relevant — an empty brief is
+# noise. The standing orders, which carry every principle, always.
 set -uo pipefail
 
 # Resolve the CLI relative to this script rather than assuming an install
@@ -42,10 +43,13 @@ for t in timeout gtimeout; do
   if command -v "$t" >/dev/null 2>&1; then TIMEOUT="$t"; break; fi
 done
 BRIEF=$(${TIMEOUT:+$TIMEOUT 20} uv run --quiet "$DG" brief --project "$PWD" --only-if-relevant 2>/dev/null) || exit 0
-[[ -n "$BRIEF" ]] || exit 0
 
 # An empty file: the statusline reads only the name, never the contents.
-mkdir -p "${MARK%/*}" 2>/dev/null && : > "$MARK" 2>/dev/null
+# Only a real brief lights the badge; orders alone are not a primed project.
+if [[ -n "$BRIEF" ]]; then
+  mkdir -p "${MARK%/*}" 2>/dev/null && : > "$MARK" 2>/dev/null
+  BRIEF+=$'\n\n'
+fi
 
 # The standing orders come from the CLI so this hook, SKILL.md and every
 # other adapter cannot drift apart.
@@ -63,8 +67,6 @@ done
 cat <<PRIME
 PRECEDENT — your recorded decisions, loaded for this session.
 
-$BRIEF
-
-$ORDERS
+$BRIEF$ORDERS
 ${SKILL:+Full guidance: $SKILL}
 PRIME

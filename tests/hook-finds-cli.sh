@@ -27,6 +27,8 @@ uv run --quiet "$CLI" tag --project "$PROJECT" --add bot,python >/dev/null
 uv run --quiet "$CLI" record --project "$PROJECT" \
   --title "Postgres for state" --scope architecture --topic persistence \
   --chose postgres --rejected sqlite --rationale "concurrent writers" >/dev/null
+# A topicless principle: an agent instruction that must reach every session.
+uv run --quiet "$CLI" principle --id hook-test-p --statement "HOOK-TEST-PRINCIPLE" >/dev/null
 
 fail=0
 assert_primes() {  # <layout name> <path to hook>
@@ -52,6 +54,9 @@ assert_primes() {  # <layout name> <path to hook>
   elif [[ ! -f "$guidance" ]]; then
     echo "FAIL: $name layout — guidance path does not resolve: $guidance" >&2
     fail=1
+  elif ! printf '%s' "$out" | grep -q "HOOK-TEST-PRINCIPLE"; then
+    echo "FAIL: $name layout — standing orders carry no principle" >&2
+    fail=1
   else
     echo "ok: $name layout primes, guidance resolves"
   fi
@@ -75,5 +80,26 @@ cp -R "$ROOT/adapters/claude/skills/precedent-check" \
       "$ACR/skills/acr__someone__pkg__precedent-check"
 assert_primes acr-realized \
   "$ACR/hooks/acr__someone__pkg__session-start/session-start.sh"
+
+# An empty directory has no brief, and still gets the standing orders with
+# every principle. It is not a primed project, so no statusline marker.
+EMPTY="$WORK/empty"
+mkdir -p "$EMPTY"
+PROJECT="$EMPTY" assert_primes empty-directory "$HOOK"
+if [[ -e "$CLAUDE_CONFIG_DIR/.precedent-primed/${EMPTY//[^A-Za-z0-9-]/_}" ]]; then
+  echo "FAIL: empty-directory — a session with no brief lit the statusline badge" >&2
+  fail=1
+fi
+
+# A fresh user has no store at all: the orders still print. (That
+# standing-orders itself creates nothing is pinned in selftest; `brief`, a
+# writer, already creates the store directory here today.)
+out=$(cd "$EMPTY" && PRECEDENT_HOME="$WORK/nostore" bash "$HOOK") || true
+if ! printf '%s' "$out" | grep -q "Standing orders"; then
+  echo "FAIL: no-store — hook printed no standing orders" >&2
+  fail=1
+else
+  echo "ok: no-store prints the orders"
+fi
 
 exit "$fail"
