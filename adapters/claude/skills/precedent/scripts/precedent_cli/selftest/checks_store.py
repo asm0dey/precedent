@@ -17,6 +17,7 @@ LOCK_FILE = ".lock"   # a pre-engine-swap store's lock file; relocate leaves it 
 COUNT_NODES = "MATCH (n) RETURN count(n) AS n"
 CREATE_GF_PROJECT = "CREATE (:Project {id:$id, name:'gf', portable:$pp, paths:$id})"
 PROJECT_BY_ID = "MATCH (p:Project {id:$id}) RETURN p.id AS id"
+UNREADABLE = "principles could not be read:"   # what standing-orders prints instead of failing
 
 
 def _expect_exit(fn, *args, message: str | None = None, **kwargs) -> SystemExit:
@@ -694,12 +695,12 @@ def _check_standing_orders_principles() -> None:
         junk = td / "junk"
         junk.mkdir()
         (junk / GRAPH).write_bytes(b"not a database")
-        assert "principles could not be read:" in orders(junk), orders(junk)
+        assert UNREADABLE in orders(junk), orders(junk)
 
         pointed = td / "pointed"
         pointed.mkdir()
         (pointed / POINTER).write_text("", encoding="utf-8")
-        assert "principles could not be read:" in orders(pointed), orders(pointed)
+        assert UNREADABLE in orders(pointed), orders(pointed)
 
         # One hop, like every other command: a pointer inside the target is a
         # stale file, and following it found nothing and created a graph.
@@ -716,7 +717,7 @@ def _check_standing_orders_principles() -> None:
         lost = td / "lost"
         lost.mkdir()
         (lost / POINTER).write_text(str(td / "unmounted"), encoding="utf-8")
-        assert "principles could not be read:" in orders(lost), orders(lost)
+        assert UNREADABLE in orders(lost), orders(lost)
         assert not (td / "unmounted").exists()
 
     # A session the hook never reached learns of the orders only from the
