@@ -542,7 +542,8 @@ def _check_principle_retire() -> None:
 
     def principle(ps, **kw):
         args = {"id": "selftest-retire", "statement": "", "derived_from": "",
-                "topic": "selftest-retire-topic", "retire": False, "because": ""}
+                "topic": "" if kw.get("retire") else "selftest-retire-topic",
+                "retire": False, "because": ""}
         with contextlib.redirect_stdout(io.StringIO()):
             cmd_principle(_argparse.Namespace(**{**args, **kw}), ps)
 
@@ -576,6 +577,9 @@ def _check_principle_retire() -> None:
         assert not ps.q("MATCH (pr:Principle {id:'selftest-retire-missing'}) RETURN pr.id AS id")
         _expect_exit(principle, ps, statement="",
                      message="recording without --statement must be refused")
+        _expect_exit(principle, ps, retire=True, because="b", statement="new words",
+                     message="--retire with --statement must be refused, not discard it")
+        assert state(ps)["b"] == "obsolete", "a refused retire must change nothing"
 
         replay_entry(ps, {"op": "principle_retire", "id": "selftest-retire",
                           "because": "again", "ts": today()})

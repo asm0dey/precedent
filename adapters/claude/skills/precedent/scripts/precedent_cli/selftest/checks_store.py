@@ -701,12 +701,31 @@ def _check_standing_orders_principles() -> None:
         (pointed / POINTER).write_text("", encoding="utf-8")
         assert "principles could not be read:" in orders(pointed), orders(pointed)
 
+        # One hop, like every other command: a pointer inside the target is a
+        # stale file, and following it found nothing and created a graph.
+        (home / POINTER).write_text(str(td / "nowhere"), encoding="utf-8")
+        relocated = td / "relocated"
+        relocated.mkdir()
+        (relocated / POINTER).write_text(str(home), encoding="utf-8")
+        assert "#selftest-so-a" in orders(relocated), orders(relocated)
+        assert not (td / "nowhere").exists(), "a second hop must not be followed"
+        (home / POINTER).unlink()
+
+        # A relocated store whose target vanished (an unmounted drive) is not
+        # a fresh user: the principles are missing, and that must be said.
+        lost = td / "lost"
+        lost.mkdir()
+        (lost / POINTER).write_text(str(td / "unmounted"), encoding="utf-8")
+        assert "principles could not be read:" in orders(lost), orders(lost)
+        assert not (td / "unmounted").exists()
+
     # A session the hook never reached learns of the orders only from the
     # skill description, the one part of a skill that is always in context.
     skill = (CLI.parent.parent / "SKILL.md").read_text(encoding="utf-8")
     desc = next(line for line in skill.splitlines() if line.startswith("description:"))
     desc = desc.removeprefix("description:").strip()
     assert "standing-orders" in desc, "the description must tell hook-less sessions to run it"
+    assert "uv run" in desc, "bare python lacks graphdblite; the description must say uv run"
     assert len(desc) <= 1024, f"skill descriptions are capped at 1024 chars, this is {len(desc)}"
 
 

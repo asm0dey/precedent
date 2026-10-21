@@ -295,6 +295,11 @@ def cmd_principle(a, s: Store) -> None:
         # way to tell a principle dropped on purpose from one lost by accident.
         if not a.because.strip():
             raise SystemExit("error: --retire needs --because, the reason it no longer holds")
+        # Retiring discards nothing else, so a reworded statement given here
+        # was meant as a re-record: say so rather than drop it.
+        if a.statement.strip() or a.topic.strip() or a.derived_from.strip():
+            raise SystemExit("error: --retire takes only --id and --because; "
+                             "to reword a principle, re-record it without --retire")
         if not s.q("MATCH (pr:Principle {id:$id}) RETURN pr.id AS id", {"id": a.id}):
             raise SystemExit(f"error: no principle with id {a.id}")
         e = {"id": a.id, "because": a.because}

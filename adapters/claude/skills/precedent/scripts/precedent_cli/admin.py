@@ -121,9 +121,15 @@ def cmd_standing_orders(a) -> None:
     # command exists to prevent.
     try:
         resolved = resolve_home(home)
+        if resolved != home and not resolved.is_dir():
+            # Relocated, and the target is gone (an unmounted drive): unlike
+            # a fresh user, this one has principles, and they are missing.
+            raise SystemExit(f"the store's location {resolved} does not exist")
         if not (resolved / GRAPH).is_file():
             return
-        with Store(resolved, write=False) as s:
+        # `home`, not `resolved`: Store follows the pointer itself, and a
+        # second hop would read (and create) whatever a stale pointer names.
+        with Store(home, write=False) as s:
             rows = s.q("""MATCH (pr:Principle) WHERE pr.retired IS NULL
                           RETURN pr.id AS id, pr.statement AS stmt ORDER BY pr.created""")
     except (SystemExit, Exception) as exc:  # NOSONAR python:S5754
