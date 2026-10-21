@@ -1,5 +1,6 @@
 # SessionStart hook: prime the session with the user's recorded decisions.
-# Silent unless the graph has something relevant — an empty brief is noise.
+# The brief only when the graph has something relevant — an empty brief is
+# noise. The standing orders, which carry every principle, always.
 # Twin of session-start.sh; both must stay behaviourally identical.
 #
 # hooks.json cannot gate a hook entry by platform (there is no such field in
@@ -46,11 +47,17 @@ if (-not $dg) { exit 0 }
 if (-not (Get-Command uv -ErrorAction SilentlyContinue)) { exit 0 }
 
 $brief = (& uv run --quiet $dg brief --project $PWD --only-if-relevant 2>$null) -join "`n"
-if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($brief)) { exit 0 }
+if ($LASTEXITCODE -ne 0) { exit 0 }
 
 # An empty file: the statusline reads only the name, never the contents.
-New-Item -ItemType Directory -Path $markDir -Force -ErrorAction SilentlyContinue | Out-Null
-New-Item -ItemType File -Path $mark -Force -ErrorAction SilentlyContinue | Out-Null
+# Only a real brief lights the badge; orders alone are not a primed project.
+if (-not [string]::IsNullOrWhiteSpace($brief)) {
+    New-Item -ItemType Directory -Path $markDir -Force -ErrorAction SilentlyContinue | Out-Null
+    New-Item -ItemType File -Path $mark -Force -ErrorAction SilentlyContinue | Out-Null
+    $brief += "`n`n"
+} else {
+    $brief = ''
+}
 
 $orders = (& uv run --quiet $dg standing-orders 2>$null) -join "`n"
 if ($LASTEXITCODE -ne 0) { exit 0 }
@@ -66,8 +73,6 @@ $skill = $skillCandidates | Where-Object { Test-Path $_ } | Select-Object -First
 @"
 PRECEDENT — your recorded decisions, loaded for this session.
 
-$brief
-
-$orders
+$brief$orders
 Full guidance: $skill
 "@

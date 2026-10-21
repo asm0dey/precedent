@@ -1,6 +1,6 @@
 ---
 name: precedent
-description: Remember and reuse the user's architectural, business, and tooling decisions across every project, in a queryable graph. Use this skill whenever the user settles a non-trivial choice (database, framework, auth, deployment, pricing, process) so it gets recorded; whenever they start work in a project you have not briefed on yet, including one that predates the graph and whose decisions are only visible in its manifests, CI and docs; whenever they weigh options and ask "which should I use" or "what did I do last time"; whenever they say a past choice was a mistake, that it bit them, or that they would not do it that way again; whenever they knowingly depart here from how they usually do it; and whenever they ask what they have already decided, whether a choice is consistent with their other projects, or what decisions they still owe this project. Trigger it even when the user does not mention decisions, memory, or the graph — the point is that they should not have to remember to ask.
+description: Remember and reuse the user's architectural, business, and tooling decisions across every project, in a queryable graph. Use whenever the user settles a non-trivial choice (database, framework, auth, deployment, pricing, process) so it gets recorded; starts work in a project you have not briefed on, including one whose decisions are only visible in its manifests, CI and docs; weighs options or asks "which should I use" or "what did I do last time"; says a past choice was a mistake, bit them, or they would not repeat it; knowingly departs from how they usually do it; or asks what they already decided, whether a choice is consistent with their other projects, or what decisions they still owe this project. Trigger it even when the user does not mention decisions or the graph. If no PRECEDENT block is in context, run uv run <this skill's directory>/scripts/precedent.py standing-orders before your first shell command and follow what it prints.
 ---
 
 # Decision graph
@@ -60,10 +60,14 @@ Code also takes them as slash commands; Codex takes them with a `$` prefix.
 
 ## Standing orders
 
-The session-start hook prints the standing orders automatically. To see them
-without a hook, or from another agent:
+The session-start hook prints the standing orders automatically, in every
+directory, empty ones included. To see them without a hook, or from another
+agent:
 
     uv run <skill>/scripts/precedent.py standing-orders
+
+Every active principle prints as part of them, after the fixed orders. Follow
+those as orders, not context.
 
 You are reading this once, and then the conversation continues for another hour.
 Everything below has to survive that. Treat these as active for the rest of the
@@ -340,6 +344,21 @@ uv run <skill>/scripts/precedent.py principle --id persistence-postgres \
 
 A principle is a claim about the future, so ask before creating one. Repetition
 is evidence, not consent.
+
+A principle with no `--topic` is a global instruction about how the agent
+works, such as "never wait on a process with `pgrep -f`; it matches its own
+poller". The user adds these when they see an agent fail the same way
+repeatedly: when they ask, draft the command, show it, and run it once they
+confirm. Never offer one unprompted.
+
+When a principle stops holding, retire it with the reason. It stops printing
+and stops reaching `check`, and stays in the graph so `suggest` does not offer
+it again. Re-recording the same id brings it back.
+
+```bash
+uv run <skill>/scripts/precedent.py principle --id persistence-postgres \
+  --retire --because "we moved state to the managed KV store"
+```
 
 ## Tagging a project — your job, not a lookup table
 

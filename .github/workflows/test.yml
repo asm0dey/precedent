@@ -82,6 +82,12 @@ jobs:
           $out = (& "${{ github.workspace }}/adapters/claude/hooks/session-start.ps1") -join "`n"
           if ($LASTEXITCODE -ne 0) { throw "session-start.ps1 exited $LASTEXITCODE" }
           if ($out -notmatch 'PRECEDENT') { throw "session-start.ps1 printed no brief: $out" }
+          # An empty directory has no brief and must still get the orders.
+          $empty = New-Item -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP 'precedent-empty')
+          Push-Location $empty
+          $out = (& "${{ github.workspace }}/adapters/claude/hooks/session-start.ps1") -join "`n"
+          Pop-Location
+          if ($out -notmatch 'Standing orders') { throw "session-start.ps1 printed no orders in an empty directory: $out" }
 
       - name: windows statusline adapter runs clean
         if: matrix.os == 'windows-latest'

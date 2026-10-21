@@ -10,13 +10,14 @@ import time
 
 from ..admin import cmd_standing_orders, export_to, relocate
 from ..cli import build_parser, wants_write
-from ..core import CLI, AMENDABLE, GRAPH, GRAPH_FORMAT, JOURNAL, JournalTooNew, POINTER, SCHEMA, Store, csv, resolve_home, slug, today
+from ..core import CLI, AMENDABLE, STANDING_ORDERS, GRAPH, GRAPH_FORMAT, JOURNAL, JournalTooNew, POINTER, SCHEMA, Store, csv, resolve_home, slug, today
 from ..replay import replay_entry, replay_journal
 
 LOCK_FILE = ".lock"   # a pre-engine-swap store's lock file; relocate leaves it behind
 COUNT_NODES = "MATCH (n) RETURN count(n) AS n"
 CREATE_GF_PROJECT = "CREATE (:Project {id:$id, name:'gf', portable:$pp, paths:$id})"
 PROJECT_BY_ID = "MATCH (p:Project {id:$id}) RETURN p.id AS id"
+UNREADABLE = "principles could not be read:"   # what standing-orders prints instead of failing
 
 
 def _expect_exit(fn, *args, message: str | None = None, **kwargs) -> SystemExit:
@@ -628,6 +629,105 @@ def _check_standing_orders() -> None:
     for verb, phrase in distinguishing_phrases.items():
         assert phrase in text, f"the banner must keep the bullet that covers `{verb}`"
     assert "not a veto" in text, "the banner must keep the 'precedent is information' line"
+
+
+
+def _check_standing_orders_principles() -> None:
+    """Active principles ride in the standing orders, in every directory.
+
+    The command runs from a hook that may fire where nothing was ever
+    recorded, so it must not create a store, and an unreadable store must
+    say so in the output rather than drop the principles silently.
+    """
+    import argparse
+    import contextlib
+    import io
+    import tempfile
+    from ..cli import main
+
+    def run(*argv) -> str:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            main(list(argv))
+        return out.getvalue()
+
+    def orders(home) -> str:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cmd_standing_orders(argparse.Namespace(home=str(home)))
+        return out.getvalue()
+
+    # From the constant, not cmd_standing_orders(None): that reads the
+    # default home, which on a developer's machine holds real principles.
+    banner = STANDING_ORDERS.format(cli=CLI) + "\n"
+
+    with tempfile.TemporaryDirectory() as td:
+        td = pathlib.Path(td)
+        missing = td / "missing"
+        assert orders(missing) == banner, "no store: the banner alone"
+        assert not missing.exists(), "standing-orders must not create a store"
+
+        empty = td / "empty"
+        empty.mkdir()
+        (empty / JOURNAL).write_text("", encoding="utf-8")
+        assert orders(empty) == banner, "no graph: the banner alone"
+        assert not (empty / GRAPH).exists(), "standing-orders must not create a graph"
+
+        home = td / "store"
+        proj = td / "proj"
+        proj.mkdir()
+        run("--home", str(home), "principle", "--id", "selftest-so-a",
+            "--statement", "Never pgrep -f in a poll loop.")
+        run("--home", str(home), "principle", "--id", "selftest-so-r",
+            "--statement", "Retired text.")
+        run("--home", str(home), "principle", "--id", "selftest-so-r",
+            "--retire", "--because", "gone")
+        text = orders(home)
+        assert text.startswith(banner), text
+        assert "- Never pgrep -f in a poll loop.  #selftest-so-a" in text, text
+        assert "Retired text." not in text, "a retired principle must not print"
+
+        run("--home", str(home), "tag", "--project", str(proj), "--add", "selftest-so")
+        brief = run("--home", str(home), "brief", "--project", str(proj))
+        assert "== standing principles ==" not in brief, brief
+        assert "Never pgrep -f" not in brief, "principles print in the orders, not the brief"
+
+        junk = td / "junk"
+        junk.mkdir()
+        (junk / GRAPH).write_bytes(b"not a database")
+        assert UNREADABLE in orders(junk), orders(junk)
+
+        pointed = td / "pointed"
+        pointed.mkdir()
+        (pointed / POINTER).write_text("", encoding="utf-8")
+        assert UNREADABLE in orders(pointed), orders(pointed)
+
+        # One hop, like every other command: a pointer inside the target is a
+        # stale file, and following it found nothing and created a graph.
+        (home / POINTER).write_text(str(td / "nowhere"), encoding="utf-8")
+        relocated = td / "relocated"
+        relocated.mkdir()
+        (relocated / POINTER).write_text(str(home), encoding="utf-8")
+        assert "#selftest-so-a" in orders(relocated), orders(relocated)
+        assert not (td / "nowhere").exists(), "a second hop must not be followed"
+        (home / POINTER).unlink()
+
+        # A relocated store whose target vanished (an unmounted drive) is not
+        # a fresh user: the principles are missing, and that must be said.
+        lost = td / "lost"
+        lost.mkdir()
+        (lost / POINTER).write_text(str(td / "unmounted"), encoding="utf-8")
+        assert UNREADABLE in orders(lost), orders(lost)
+        assert not (td / "unmounted").exists()
+
+    # A session the hook never reached learns of the orders only from the
+    # skill description, the one part of a skill that is always in context.
+    skill = (CLI.parent.parent / "SKILL.md").read_text(encoding="utf-8")
+    desc = next(line for line in skill.splitlines() if line.startswith("description:"))
+    desc = desc.removeprefix("description:").strip()
+    assert "standing-orders" in desc, "the description must tell hook-less sessions to run it"
+    assert "uv run" in desc, "bare python lacks graphdblite; the description must say uv run"
+    assert len(desc) <= 1024, f"skill descriptions are capped at 1024 chars, this is {len(desc)}"
 
 
 def _check_entry_point() -> None:

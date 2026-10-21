@@ -224,6 +224,11 @@ embed.
 it stop counting toward the pattern. Without that, "you chose mongo in eight projects" argues
 for a ninth, and repetition turns a scar into a recommendation.
 
+**Principles reach every session.** A choice promoted to a principle, or a topicless one you add
+yourself (`principle --id no-pgrep-f --statement "..."`), prints with the standing orders at
+the start of every session, in every directory and for every agent. `principle --id X --retire
+--because "..."` stops it, and keeps the reason.
+
 ### How it compares
 
 | | Stores | Retrieval | Scope | Answers with |

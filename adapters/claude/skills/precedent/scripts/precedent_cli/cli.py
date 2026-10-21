@@ -87,9 +87,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     pr = sub.add_parser("principle", help="promote a repeated choice to a standing principle")
     pr.add_argument("--id", required=True)
-    pr.add_argument("--statement", required=True)
+    pr.add_argument("--statement", default="")
     pr.add_argument("--derived-from", default="")
     pr.add_argument("--topic", default="", help="comma-separated topics this governs")
+    pr.add_argument("--retire", action="store_true",
+                    help="stop the principle printing and governing; it stays in the graph")
+    pr.add_argument("--because", default="",
+                    help="why it no longer holds — required with --retire")
     pr.set_defaults(writes=True, fn=cmd_principle)
 
     tg = sub.add_parser("tag", help="list the tag vocabulary, or change this project's tags")
