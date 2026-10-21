@@ -4,7 +4,7 @@ import json
 import os
 import pathlib
 
-from .core import CLI, DEFAULT_HOME, POINTER, STANDING_ORDERS, Store, resolve_home
+from .core import CLI, DEFAULT_HOME, GRAPH, HOME, POINTER, STANDING_ORDERS, Store, resolve_home
 
 
 def _ensure_removable(path: pathlib.Path) -> None:
@@ -102,17 +102,36 @@ def cmd_init(a) -> None:
 
 
 def cmd_standing_orders(a) -> None:
-    """Print the banner every adapter appends after a brief.
+    """Print the banner every adapter appends after a brief, then every
+    active principle as a further order.
 
-    Runs without a Store: opening one would create the store directory as a
-    side effect of printing text, and this command is called from hooks that
-    may run in directories the user never records anything in.
+    Opens the store only when its graph already exists, read-only: creating
+    one would be a side effect of printing text, and this command is called
+    from hooks that may run in directories the user never records anything in.
 
     Prints `core.CLI`, which is derived from the entry script's own location
     rather than assumed, so a checkout installed anywhere — ~/.claude/skills,
     an ACR cache, a bare clone — prints a command line that actually runs.
     """
     print(STANDING_ORDERS.format(cli=CLI))
+    home = pathlib.Path(a.home) if a else HOME
+    # A hook prints whatever this returns and drops everything on a non-zero
+    # exit, the brief included, so a store it cannot read is reported in the
+    # output instead: principles missing without a word is the failure this
+    # command exists to prevent.
+    try:
+        resolved = resolve_home(home)
+        if not (resolved / GRAPH).is_file():
+            return
+        with Store(resolved, write=False) as s:
+            rows = s.q("""MATCH (pr:Principle) WHERE pr.retired IS NULL
+                          RETURN pr.id AS id, pr.statement AS stmt ORDER BY pr.created""")
+    except (SystemExit, Exception) as exc:  # NOSONAR python:S5754
+        reason = str(exc).strip().splitlines()[0] if str(exc).strip() else type(exc).__name__
+        print(f"- principles could not be read: {reason}")
+        return
+    for r in rows:
+        print(f"- {r['stmt']}  #{r['id']}")
 
 
 def cmd_cypher(a, s: Store) -> None:

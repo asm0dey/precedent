@@ -96,7 +96,7 @@ def _print_peer_precedent(s: Store, kin: list[dict]) -> None:
               f"   [{r['n']}x: {','.join(r['projects'])}]")
 
 
-def _print_lessons_and_principles(s: Store) -> None:
+def _print_lessons(s: Store) -> None:
     lessons = s.q("""MATCH (l:Lesson)
                      RETURN l.id AS id, l.topic AS topic, l.option AS option,
                             l.statement AS stmt, l.instead AS instead
@@ -106,12 +106,6 @@ def _print_lessons_and_principles(s: Store) -> None:
         for r in lessons:
             tail = f"  -> now prefer {r['instead']}" if r["instead"] else ""
             print(f"  {r['topic']}: not {r['option']} — {r['stmt']}{tail}  #{r['id']}")
-
-    prins = s.q("MATCH (pr:Principle) RETURN pr.id AS id, pr.statement AS stmt ORDER BY pr.created")
-    if prins:
-        print("\n== standing principles ==")
-        for r in prins:
-            print(f"  {r['stmt']}  #{r['id']}")
 
 
 def cmd_brief(a, s: Store) -> None:
@@ -163,7 +157,9 @@ def cmd_brief(a, s: Store) -> None:
         return
 
     _print_peer_precedent(s, kin)
-    _print_lessons_and_principles(s)
+    # Principles are not printed here: they ride in the standing orders,
+    # which reach every directory, not only a tagged project's brief.
+    _print_lessons(s)
     # Graph-wide on purpose: the SessionStart hook is the one place every
     # user's graph gets looked at, and a misfiled topic in any project
     # distorts `check` in every project that shares it.

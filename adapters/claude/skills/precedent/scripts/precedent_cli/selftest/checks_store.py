@@ -10,7 +10,7 @@ import time
 
 from ..admin import cmd_standing_orders, export_to, relocate
 from ..cli import build_parser, wants_write
-from ..core import CLI, AMENDABLE, GRAPH, GRAPH_FORMAT, JOURNAL, JournalTooNew, POINTER, SCHEMA, Store, csv, resolve_home, slug, today
+from ..core import CLI, AMENDABLE, STANDING_ORDERS, GRAPH, GRAPH_FORMAT, JOURNAL, JournalTooNew, POINTER, SCHEMA, Store, csv, resolve_home, slug, today
 from ..replay import replay_entry, replay_journal
 
 LOCK_FILE = ".lock"   # a pre-engine-swap store's lock file; relocate leaves it behind
@@ -628,6 +628,78 @@ def _check_standing_orders() -> None:
     for verb, phrase in distinguishing_phrases.items():
         assert phrase in text, f"the banner must keep the bullet that covers `{verb}`"
     assert "not a veto" in text, "the banner must keep the 'precedent is information' line"
+
+
+
+def _check_standing_orders_principles() -> None:
+    """Active principles ride in the standing orders, in every directory.
+
+    The command runs from a hook that may fire where nothing was ever
+    recorded, so it must not create a store, and an unreadable store must
+    say so in the output rather than drop the principles silently.
+    """
+    import argparse
+    import contextlib
+    import io
+    import tempfile
+    from ..cli import main
+
+    def run(*argv) -> str:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            main(list(argv))
+        return out.getvalue()
+
+    def orders(home) -> str:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cmd_standing_orders(argparse.Namespace(home=str(home)))
+        return out.getvalue()
+
+    # From the constant, not cmd_standing_orders(None): that reads the
+    # default home, which on a developer's machine holds real principles.
+    banner = STANDING_ORDERS.format(cli=CLI) + "\n"
+
+    with tempfile.TemporaryDirectory() as td:
+        td = pathlib.Path(td)
+        missing = td / "missing"
+        assert orders(missing) == banner, "no store: the banner alone"
+        assert not missing.exists(), "standing-orders must not create a store"
+
+        empty = td / "empty"
+        empty.mkdir()
+        (empty / JOURNAL).write_text("", encoding="utf-8")
+        assert orders(empty) == banner, "no graph: the banner alone"
+        assert not (empty / GRAPH).exists(), "standing-orders must not create a graph"
+
+        home = td / "store"
+        proj = td / "proj"
+        proj.mkdir()
+        run("--home", str(home), "principle", "--id", "selftest-so-a",
+            "--statement", "Never pgrep -f in a poll loop.")
+        run("--home", str(home), "principle", "--id", "selftest-so-r",
+            "--statement", "Retired text.")
+        run("--home", str(home), "principle", "--id", "selftest-so-r",
+            "--retire", "--because", "gone")
+        text = orders(home)
+        assert text.startswith(banner), text
+        assert "- Never pgrep -f in a poll loop.  #selftest-so-a" in text, text
+        assert "Retired text." not in text, "a retired principle must not print"
+
+        run("--home", str(home), "tag", "--project", str(proj), "--add", "selftest-so")
+        brief = run("--home", str(home), "brief", "--project", str(proj))
+        assert "== standing principles ==" not in brief, brief
+        assert "Never pgrep -f" not in brief, "principles print in the orders, not the brief"
+
+        junk = td / "junk"
+        junk.mkdir()
+        (junk / GRAPH).write_bytes(b"not a database")
+        assert "principles could not be read:" in orders(junk), orders(junk)
+
+        pointed = td / "pointed"
+        pointed.mkdir()
+        (pointed / POINTER).write_text("", encoding="utf-8")
+        assert "principles could not be read:" in orders(pointed), orders(pointed)
 
 
 def _check_entry_point() -> None:
