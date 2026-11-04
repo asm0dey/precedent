@@ -102,6 +102,29 @@ else
   echo "ok: no-store prints the orders"
 fi
 
+# SubagentStart (issue #35): the same CLI lookup, answering in hook JSON with
+# the subagent's own cwd, and leaving the session's statusline badge alone.
+PROJECT="$WORK/proj"
+assert_subagent() {  # <layout name> <path to hook>
+  local name=$1 hook=$2 out mark
+  mark="$CLAUDE_CONFIG_DIR/.precedent-primed/${PROJECT//[^A-Za-z0-9-]/_}"
+  mkdir -p "${mark%/*}" && : > "$mark"
+  out=$(cd "$EMPTY" && printf '{"cwd":"%s","agent_type":"general-purpose"}' "$PROJECT" \
+        | bash "$hook" --subagent) || true
+  if ! printf '%s' "$out" | python3 -c 'import json,sys; c=json.load(sys.stdin)["hookSpecificOutput"]["additionalContext"]; sys.exit("Postgres for state" not in c)' 2>/dev/null; then
+    echo "FAIL: $name subagent — no hook JSON carrying the project's brief:" >&2
+    printf '%s\n' "$out" >&2
+    fail=1
+  elif [[ ! -e "$mark" ]]; then
+    echo "FAIL: $name subagent — the session's statusline marker was removed" >&2
+    fail=1
+  else
+    echo "ok: $name subagent gets the brief"
+  fi
+}
+assert_subagent repository "$HOOK"
+assert_subagent acr-realized "$ACR/hooks/acr__someone__pkg__session-start/session-start.sh"
+
 # A brief that fails must say so (issue #33): silence reads as "nothing
 # recorded here", and the user stops getting precedents without noticing.
 assert_unavailable() {  # <case name> <expected notice text> [env assignments...]

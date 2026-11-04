@@ -423,6 +423,7 @@ def _check_lock_modes() -> None:
         "check": False, "suggest": False, "export": False,
         "maintain": False,      # until --apply; see wants_write()
         "standing-orders": False,  # returns before any Store is opened
+        "subagent-start": False,   # opens no Store; the brief it runs opens its own
         # writers
         "record": True, "tag": True, "regret": True, "principle": True,
         "rebuild": True, "selftest": True,
@@ -630,6 +631,62 @@ def _check_standing_orders() -> None:
         assert phrase in text, f"the banner must keep the bullet that covers `{verb}`"
     assert "not a veto" in text, "the banner must keep the 'precedent is information' line"
 
+
+
+def _check_subagent_start() -> None:
+    """The SubagentStart hook gets the same brief and orders as a session, as
+    hook JSON, and never fails a subagent: bad input prints nothing (#35)."""
+    import contextlib
+    import io
+    import tempfile
+    from ..cli import main
+
+    def hook(home, stdin: str) -> str:
+        out, was = io.StringIO(), sys.stdin
+        sys.stdin = io.StringIO(stdin)
+        try:
+            with contextlib.redirect_stdout(out):
+                main(["--home", str(home), "subagent-start"])
+        finally:
+            sys.stdin = was
+        return out.getvalue()
+
+    def context(text: str) -> str:
+        spec = json.loads(text)["hookSpecificOutput"]
+        assert spec["hookEventName"] == "SubagentStart", spec
+        return spec["additionalContext"]
+
+    with tempfile.TemporaryDirectory() as td:
+        td = pathlib.Path(td)
+        home, proj = td / "store", td / "proj"
+        proj.mkdir()
+        with contextlib.redirect_stdout(io.StringIO()):
+            main(["--home", str(home), "record", "--project", str(proj),
+                  "--title", "selftest-sa decision", "--scope", "tooling",
+                  "--topic", "selftest-sa", "--chose", "x", "--rationale", "r"])
+            main(["--home", str(home), "principle", "--id", "selftest-sa-p",
+                  "--statement", "selftest-sa principle"])
+
+        ctx = context(hook(home, json.dumps({"cwd": str(proj), "agent_type": "general-purpose"})))
+        assert "selftest-sa decision" in ctx and "selftest-sa principle" in ctx, ctx
+        assert hook(home, json.dumps({"cwd": str(proj), "agent_type": "Explore"})) == ""
+        assert hook(home, "") == "", "empty stdin must print nothing"
+        assert hook(home, "not json") == "", "malformed stdin must print nothing"
+
+        # No cwd in the input: the hook process's own directory stands in.
+        here = os.getcwd()
+        os.chdir(proj)
+        try:
+            ctx = context(hook(home, json.dumps({"agent_type": "general-purpose"})))
+        finally:
+            os.chdir(here)
+        assert "selftest-sa decision" in ctx, ctx
+
+        junk = td / "junk"
+        junk.mkdir()
+        (junk / GRAPH).write_bytes(b"not a database")
+        ctx = context(hook(junk, json.dumps({"cwd": str(proj)})))
+        assert "PRECEDENT unavailable: " in ctx, ctx
 
 
 def _check_standing_orders_principles() -> None:

@@ -20,8 +20,10 @@ HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 # the directory this hook primed. Dropping it first and writing it back only
 # on a successful, non-empty brief means every early exit below — no CLI, no
 # uv, nothing to say — also clears a badge left by an earlier session.
+# A subagent (--subagent) is not a session: its run must leave the badge as
+# the session left it.
 MARK="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.precedent-primed/${PWD//[^A-Za-z0-9-]/_}"
-rm -f "$MARK" 2>/dev/null
+[[ ${1-} == --subagent ]] || rm -f "$MARK" 2>/dev/null
 DG=""
 for candidate in "$HERE/../skills/precedent/scripts/precedent.py" \
                  "$HERE"/../../skills/*precedent/scripts/precedent.py; do
@@ -42,6 +44,13 @@ TIMEOUT=""
 for t in timeout gtimeout; do
   if command -v "$t" >/dev/null 2>&1; then TIMEOUT="$t"; break; fi
 done
+
+# SubagentStart (hooks.json passes --subagent): the CLI reads the hook's JSON
+# on stdin, for the subagent's own cwd, and answers in the hook JSON that
+# event requires — plain stdout is not added as context there.
+if [[ ${1-} == --subagent ]]; then
+  exec ${TIMEOUT:+$TIMEOUT 20} uv run --quiet "$DG" subagent-start
+fi
 #
 # A failure still exits 0 — a session must never be blocked — but it says so
 # in one line: printing nothing made a broken store look like an empty one,
