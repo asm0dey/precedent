@@ -70,6 +70,9 @@ Add it as a second element of the `"hooks"` array above. The script still guards
 `if ($IsWindows -eq $false) { exit 0 }`, so it only does anything on real Windows, including the
 PowerShell 5.1 fallback Claude Code uses when `pwsh` 7 is missing.
 
+For subagents, add the same entry under `"SubagentStart"` with ` --subagent` after the script
+path (`"& \"$HOME/src/precedent/adapters/claude/hooks/session-start.ps1\" --subagent"`).
+
 ## The statusline badge
 
 A session primed by the hook is otherwise indistinguishable from one that was not, and the

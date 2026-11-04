@@ -149,4 +149,17 @@ printf '#!/bin/sh\nexit 124\n' > "$WORK/fakebin/timeout"
 chmod +x "$WORK/fakebin/timeout"
 assert_unavailable timeout "PRECEDENT unavailable: brief timed out after 20s" PATH="$WORK/fakebin:$PATH"
 
+# The subagent path must not fail silently either: uv timing out (or failing
+# before Python runs) still answers in hook JSON, with exit 0.
+status=0
+out=$(cd "$EMPTY" && printf '{"cwd":"%s"}' "$PROJECT" \
+      | PATH="$WORK/fakebin:$PATH" bash "$HOOK" --subagent) || status=$?
+if [[ $status -ne 0 ]] || ! printf '%s' "$out" | python3 -c 'import json,sys; c=json.load(sys.stdin)["hookSpecificOutput"]["additionalContext"]; sys.exit("PRECEDENT unavailable: subagent-start timed out after 20s" not in c)' 2>/dev/null; then
+  echo "FAIL: subagent-timeout — exit $status, want hook JSON with the notice:" >&2
+  printf '%s\n' "$out" >&2
+  fail=1
+else
+  echo "ok: subagent-timeout says the brief is unavailable"
+fi
+
 exit "$fail"

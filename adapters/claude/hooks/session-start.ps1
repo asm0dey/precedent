@@ -25,7 +25,10 @@ $ErrorActionPreference = 'SilentlyContinue'
 $markRoot = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $HOME '.claude' }
 $markDir = Join-Path $markRoot '.precedent-primed'
 $mark = Join-Path $markDir ($PWD.Path -replace '[^A-Za-z0-9-]', '_')
-Remove-Item -LiteralPath $mark -Force -ErrorAction SilentlyContinue
+# A subagent (the SubagentStart entry passes --subagent) is not a session:
+# its run must leave the badge as the session left it.
+$subagent = $args -contains '--subagent'
+if (-not $subagent) { Remove-Item -LiteralPath $mark -Force -ErrorAction SilentlyContinue }
 
 # Resolve the CLI relative to this script, not an assumed install path. Two
 # channels lay it out differently — see the same block in session-start.sh:
@@ -55,6 +58,22 @@ function Unavailable {
         Where-Object { $_.Trim() } | Select-Object -First 1
     if (-not $reason) { $reason = "exit status $LASTEXITCODE" }
     "PRECEDENT unavailable: $reason — rerun: uv run `"$dg`" brief --project ."
+}
+
+# SubagentStart: the CLI reads the hook's JSON from stdin and answers in the
+# hook JSON that event requires. A failure before Python answers gets the
+# same notice, as JSON, exactly as session-start.sh --subagent does.
+if ($subagent) {
+    $hookInput = [Console]::In.ReadToEnd()
+    $out = ($hookInput | & uv run --quiet $dg subagent-start 2>$errFile) -join "`n"
+    if ($LASTEXITCODE -eq 0) {
+        if ($out) { $out }
+    } else {
+        @{ hookSpecificOutput = @{ hookEventName = 'SubagentStart'
+                                   additionalContext = (Unavailable) } } | ConvertTo-Json -Compress
+    }
+    Remove-Item -LiteralPath $errFile -Force -ErrorAction SilentlyContinue
+    exit 0
 }
 $notice = $false
 $brief = (& uv run --quiet $dg brief --project $PWD --only-if-relevant 2>$errFile) -join "`n"

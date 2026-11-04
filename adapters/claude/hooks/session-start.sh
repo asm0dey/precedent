@@ -45,12 +45,6 @@ for t in timeout gtimeout; do
   if command -v "$t" >/dev/null 2>&1; then TIMEOUT="$t"; break; fi
 done
 
-# SubagentStart (hooks.json passes --subagent): the CLI reads the hook's JSON
-# on stdin, for the subagent's own cwd, and answers in the hook JSON that
-# event requires — plain stdout is not added as context there.
-if [[ ${1-} == --subagent ]]; then
-  exec ${TIMEOUT:+$TIMEOUT 20} uv run --quiet "$DG" subagent-start
-fi
 #
 # A failure still exits 0 — a session must never be blocked — but it says so
 # in one line: printing nothing made a broken store look like an empty one,
@@ -67,6 +61,24 @@ unavailable() {  # <exit status> <what timed out>
   fi
   printf 'PRECEDENT unavailable: %s — rerun: uv run "%s" brief --project .' "$reason" "$DG"
 }
+
+# SubagentStart (hooks.json passes --subagent): the CLI reads the hook's JSON
+# on stdin, for the subagent's own cwd, and answers in the hook JSON that
+# event requires — plain stdout is not added as context there. A failure
+# before Python answers (uv, the timeout) gets the same notice, as JSON.
+if [[ ${1-} == --subagent ]]; then
+  OUT=$(${TIMEOUT:+$TIMEOUT 20} uv run --quiet "$DG" subagent-start 2>"$ERR")
+  status=$?
+  if [[ $status -eq 0 ]]; then
+    [[ -z "$OUT" ]] || printf '%s\n' "$OUT"
+  else
+    notice=$(unavailable "$status" subagent-start)
+    notice=${notice//\\/\\\\}
+    printf '{"hookSpecificOutput": {"hookEventName": "SubagentStart", "additionalContext": "%s"}}\n' \
+      "${notice//\"/\\\"}"
+  fi
+  exit 0
+fi
 BRIEF=$(${TIMEOUT:+$TIMEOUT 20} uv run --quiet "$DG" brief --project "$PWD" --only-if-relevant 2>"$ERR")
 status=$?
 if [[ $status -ne 0 ]]; then

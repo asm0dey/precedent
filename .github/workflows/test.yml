@@ -97,6 +97,12 @@ jobs:
           Pop-Location
           if ($LASTEXITCODE -ne 0) { throw "session-start.ps1 exited $LASTEXITCODE on an unreadable store" }
           if ($out -notmatch 'PRECEDENT unavailable: ') { throw "session-start.ps1 hid an unreadable store: $out" }
+          # SubagentStart (#35): hook JSON carrying the seeded project's brief.
+          $env:PRECEDENT_HOME = "${{ runner.temp }}/precedent-hook-ci"
+          $json = ('{"cwd":"' + ("${{ github.workspace }}" -replace '\\', '\\') + '"}') |
+            pwsh -NoProfile -File "${{ github.workspace }}/adapters/claude/hooks/session-start.ps1" --subagent
+          $ctx = ($json | ConvertFrom-Json).hookSpecificOutput.additionalContext
+          if ($ctx -notmatch 'ci probe') { throw "session-start.ps1 --subagent gave no brief: $json" }
 
       - name: windows statusline adapter runs clean
         if: matrix.os == 'windows-latest'
