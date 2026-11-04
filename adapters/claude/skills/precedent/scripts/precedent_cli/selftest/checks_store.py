@@ -18,6 +18,7 @@ COUNT_NODES = "MATCH (n) RETURN count(n) AS n"
 CREATE_GF_PROJECT = "CREATE (:Project {id:$id, name:'gf', portable:$pp, paths:$id})"
 PROJECT_BY_ID = "MATCH (p:Project {id:$id}) RETURN p.id AS id"
 UNREADABLE = "principles could not be read:"   # what standing-orders prints instead of failing
+SA_TITLE = "selftest-sa decision"
 
 
 def _expect_exit(fn, *args, message: str | None = None, **kwargs) -> SystemExit:
@@ -662,13 +663,13 @@ def _check_subagent_start() -> None:
         proj.mkdir()
         with contextlib.redirect_stdout(io.StringIO()):
             main(["--home", str(home), "record", "--project", str(proj),
-                  "--title", "selftest-sa decision", "--scope", "tooling",
+                  "--title", SA_TITLE, "--scope", "tooling",
                   "--topic", "selftest-sa", "--chose", "x", "--rationale", "r"])
             main(["--home", str(home), "principle", "--id", "selftest-sa-p",
                   "--statement", "selftest-sa principle"])
 
         ctx = context(hook(home, json.dumps({"cwd": str(proj), "agent_type": "general-purpose"})))
-        assert "selftest-sa decision" in ctx and "selftest-sa principle" in ctx, ctx
+        assert SA_TITLE in ctx and "selftest-sa principle" in ctx, ctx
         assert hook(home, json.dumps({"cwd": str(proj), "agent_type": "Explore"})) == ""
         assert hook(home, "") == "", "empty stdin must print nothing"
         assert hook(home, "not json") == "", "malformed stdin must print nothing"
@@ -680,7 +681,7 @@ def _check_subagent_start() -> None:
             ctx = context(hook(home, json.dumps({"agent_type": "general-purpose"})))
         finally:
             os.chdir(here)
-        assert "selftest-sa decision" in ctx, ctx
+        assert SA_TITLE in ctx, ctx
 
         junk = td / "junk"
         junk.mkdir()

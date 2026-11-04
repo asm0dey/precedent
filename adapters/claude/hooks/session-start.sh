@@ -52,12 +52,12 @@ done
 ERR=$(mktemp 2>/dev/null) || ERR=/dev/null
 trap '[[ $ERR != /dev/null ]] && command rm -f "$ERR"' EXIT
 unavailable() {  # <exit status> <what timed out>
-  local reason
-  if [[ $1 -eq 124 && -n "$TIMEOUT" ]]; then
-    reason="$2 timed out after 20s"
+  local status=$1 what=$2 reason
+  if [[ $status -eq 124 && -n "$TIMEOUT" ]]; then
+    reason="$what timed out after 20s"
   else
     reason=$(grep -m1 -v '^[[:space:]]*$' "$ERR" 2>/dev/null)
-    reason=${reason:-"exit status $1"}
+    reason=${reason:-"exit status $status"}
   fi
   printf 'PRECEDENT unavailable: %s — rerun: uv run "%s" brief --project .' "$reason" "$DG"
 }

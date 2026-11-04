@@ -105,11 +105,14 @@ fi
 # SubagentStart (issue #35): the same CLI lookup, answering in hook JSON with
 # the subagent's own cwd, and leaving the session's statusline badge alone.
 PROJECT="$WORK/proj"
+# Claude Code hands a native path; under Git Bash on Windows $PROJECT is an
+# MSYS path native Python cannot open, so convert it as Claude Code would.
+HOOK_CWD=$(cygpath -m "$PROJECT" 2>/dev/null || printf '%s' "$PROJECT")
 assert_subagent() {  # <layout name> <path to hook>
   local name=$1 hook=$2 out mark
   mark="$CLAUDE_CONFIG_DIR/.precedent-primed/${PROJECT//[^A-Za-z0-9-]/_}"
   mkdir -p "${mark%/*}" && : > "$mark"
-  out=$(cd "$EMPTY" && printf '{"cwd":"%s","agent_type":"general-purpose"}' "$PROJECT" \
+  out=$(cd "$EMPTY" && printf '{"cwd":"%s","agent_type":"general-purpose"}' "$HOOK_CWD" \
         | bash "$hook" --subagent) || true
   if ! printf '%s' "$out" | python3 -c 'import json,sys; c=json.load(sys.stdin)["hookSpecificOutput"]["additionalContext"]; sys.exit("Postgres for state" not in c)' 2>/dev/null; then
     echo "FAIL: $name subagent — no hook JSON carrying the project's brief:" >&2
@@ -152,7 +155,7 @@ assert_unavailable timeout "PRECEDENT unavailable: brief timed out after 20s" PA
 # The subagent path must not fail silently either: uv timing out (or failing
 # before Python runs) still answers in hook JSON, with exit 0.
 status=0
-out=$(cd "$EMPTY" && printf '{"cwd":"%s"}' "$PROJECT" \
+out=$(cd "$EMPTY" && printf '{"cwd":"%s"}' "$HOOK_CWD" \
       | PATH="$WORK/fakebin:$PATH" bash "$HOOK" --subagent) || status=$?
 if [[ $status -ne 0 ]] || ! printf '%s' "$out" | python3 -c 'import json,sys; c=json.load(sys.stdin)["hookSpecificOutput"]["additionalContext"]; sys.exit("PRECEDENT unavailable: subagent-start timed out after 20s" not in c)' 2>/dev/null; then
   echo "FAIL: subagent-timeout — exit $status, want hook JSON with the notice:" >&2
