@@ -309,17 +309,23 @@ def cmd_principle(a, s: Store) -> None:
         return
     if not a.statement.strip():
         raise SystemExit("error: --statement is required unless --retire")
-    p = {"id": a.id, "statement": a.statement, "derived_from": csv(a.derived_from),
-         "topics": [t.lower() for t in csv(a.topic)]}
+    p = {"id": a.id, "statement": a.statement, "derived_from": csv(a.derived_from)}
+    # No key at all without --topic: an amendment keeps the topics it has,
+    # and the journal must say "unchanged", not "none".
+    if topics := [t.lower() for t in csv(a.topic)]:
+        p["topics"] = topics
     s.log("principle", p)
     s.q("""MERGE (pr:Principle {id:$id})
            SET pr.statement=$statement, pr.created=$created,
                pr.retired=null, pr.retired_because=null""",
         {**p, "created": today()})
-    link_topics(s, "Principle", a.id, p["topics"])
+    link_topics(s, "Principle", a.id, topics)
     for did in p["derived_from"]:
         s.q("""MATCH (pr:Principle {id:$id}),(d:Decision {id:$did})
                MERGE (pr)-[:DERIVED_FROM]->(d)""", {"id": a.id, "did": did})
     print(f"principle {a.id}: {a.statement}")
-    if not p["topics"]:
+    # From the graph, not the arguments: an amendment without --topic keeps
+    # the topics recorded earlier.
+    if not s.q("MATCH (:Principle {id:$id})-[:ABOUT]->(:Topic) RETURN 1 AS x LIMIT 1",
+               {"id": a.id}):
         print("  note: no --topic, so `check` will never surface this principle.")
