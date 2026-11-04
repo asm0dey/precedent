@@ -514,6 +514,13 @@ Wire it in `~/.claude/settings.json`:
 }
 ```
 
+Subagents do not see a SessionStart hook's output. The Claude Code plugin also
+runs the hook as `session-start.sh --subagent` on `SubagentStart`, so each
+subagent gets the brief for its own working directory and the standing orders
+(see docs/setup.md to wire it by hand). Where that hook is not installed, run
+`standing-orders` and `brief` before delegating and copy every precedent that
+binds the task into each subagent prompt.
+
 The hook covers recall. It cannot cover capture — nothing outside the
 conversation can tell when a decision was made — so the standing orders above
 remain the only mechanism for recording.

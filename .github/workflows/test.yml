@@ -88,6 +88,21 @@ jobs:
           $out = (& "${{ github.workspace }}/adapters/claude/hooks/session-start.ps1") -join "`n"
           Pop-Location
           if ($out -notmatch 'Standing orders') { throw "session-start.ps1 printed no orders in an empty directory: $out" }
+          # A store it cannot read must be reported, not silently skipped (#33).
+          $junk = New-Item -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP 'precedent-junk')
+          Set-Content -LiteralPath (Join-Path $junk 'graph.db') -Value 'not a database'
+          $env:PRECEDENT_HOME = $junk.FullName
+          Push-Location $empty
+          $out = (& "${{ github.workspace }}/adapters/claude/hooks/session-start.ps1") -join "`n"
+          Pop-Location
+          if ($LASTEXITCODE -ne 0) { throw "session-start.ps1 exited $LASTEXITCODE on an unreadable store" }
+          if ($out -notmatch 'PRECEDENT unavailable: ') { throw "session-start.ps1 hid an unreadable store: $out" }
+          # SubagentStart (#35): hook JSON carrying the seeded project's brief.
+          $env:PRECEDENT_HOME = "${{ runner.temp }}/precedent-hook-ci"
+          $json = ('{"cwd":"' + ("${{ github.workspace }}" -replace '\\', '\\') + '"}') |
+            pwsh -NoProfile -File "${{ github.workspace }}/adapters/claude/hooks/session-start.ps1" --subagent
+          $ctx = ($json | ConvertFrom-Json).hookSpecificOutput.additionalContext
+          if ($ctx -notmatch 'ci probe') { throw "session-start.ps1 --subagent gave no brief: $json" }
 
       - name: windows statusline adapter runs clean
         if: matrix.os == 'windows-latest'

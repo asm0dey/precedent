@@ -23,10 +23,25 @@ this to `~/.claude/settings.json`:
             "timeout": 20 }
         ]
       }
+    ],
+    "SubagentStart": [
+      {
+        "matcher": "*",
+        "hooks": [
+          { "type": "command",
+            "command": "\"$HOME/src/precedent/adapters/claude/hooks/session-start.sh\" --subagent",
+            "shell": "bash",
+            "timeout": 20 }
+        ]
+      }
     ]
   }
 }
 ```
+
+The `SubagentStart` entry gives every subagent the brief for its own working directory and the
+standing orders, which it would otherwise never see. It answers in the hook JSON that event
+requires, and skips read-only helpers (`Explore`, `claude-code-guide`, `statusline-setup`).
 
 `adapters/claude/hooks/hooks.json`, the copy of this block the plugin channel ships, carries the
 same single bash entry, for the same reason. Claude Code's hook schema has no per-platform field,
@@ -54,6 +69,9 @@ their own `~/.claude/settings.json`, pointing at `session-start.ps1`
 Add it as a second element of the `"hooks"` array above. The script still guards itself with
 `if ($IsWindows -eq $false) { exit 0 }`, so it only does anything on real Windows, including the
 PowerShell 5.1 fallback Claude Code uses when `pwsh` 7 is missing.
+
+For subagents, add the same entry under `"SubagentStart"` with ` --subagent` after the script
+path (`"& \"$HOME/src/precedent/adapters/claude/hooks/session-start.ps1\" --subagent"`).
 
 ## The statusline badge
 

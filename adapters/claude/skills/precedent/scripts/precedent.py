@@ -1,6 +1,6 @@
 # /// script
 # requires-python = ">=3.12"
-# dependencies = ["graphdblite"]
+# dependencies = ["graphdblite>=0.2"]
 # ///
 """precedent CLI entry point. The code lives in precedent_cli/ beside this file.
 

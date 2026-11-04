@@ -164,6 +164,9 @@ class Store:
         # CI on every OS this ships to, because the guarantee is the engine's
         # and not this file's to assert.
         try:
+            # precedent.py pins graphdblite>=<the release that writes this
+            # schema>; raise that floor whenever the on-disk schema changes, or a
+            # cached uv env keeps an old build that cannot open the store (#33).
             import graphdblite
         except ModuleNotFoundError as e:
             if e.name != "graphdblite":
