@@ -25,7 +25,10 @@ $ErrorActionPreference = 'SilentlyContinue'
 $markRoot = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $HOME '.claude' }
 $markDir = Join-Path $markRoot '.precedent-primed'
 $mark = Join-Path $markDir ($PWD.Path -replace '[^A-Za-z0-9-]', '_')
-Remove-Item -LiteralPath $mark -Force -ErrorAction SilentlyContinue
+# A subagent (the SubagentStart entry passes --subagent) is not a session:
+# its run must leave the badge as the session left it.
+$subagent = $args -contains '--subagent'
+if (-not $subagent) { Remove-Item -LiteralPath $mark -Force -ErrorAction SilentlyContinue }
 
 # Resolve the CLI relative to this script, not an assumed install path. Two
 # channels lay it out differently — see the same block in session-start.sh:
@@ -46,21 +49,51 @@ $dg = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
 if (-not $dg) { exit 0 }
 if (-not (Get-Command uv -ErrorAction SilentlyContinue)) { exit 0 }
 
-$brief = (& uv run --quiet $dg brief --project $PWD --only-if-relevant 2>$null) -join "`n"
-if ($LASTEXITCODE -ne 0) { exit 0 }
+# A failure still exits 0 but says so in one line, as in session-start.sh:
+# printing nothing made a broken store look like an empty one (issue #33).
+# This twin has no timeout guard, so there is no timed-out case to report.
+$errFile = [System.IO.Path]::GetTempFileName()
+function Unavailable {
+    $reason = Get-Content -LiteralPath $errFile -ErrorAction SilentlyContinue |
+        Where-Object { $_.Trim() } | Select-Object -First 1
+    if (-not $reason) { $reason = "exit status $LASTEXITCODE" }
+    "PRECEDENT unavailable: $reason — rerun: uv run `"$dg`" brief --project ."
+}
+
+# SubagentStart: the CLI reads the hook's JSON from stdin and answers in the
+# hook JSON that event requires. A failure before Python answers gets the
+# same notice, as JSON, exactly as session-start.sh --subagent does.
+if ($subagent) {
+    $hookInput = [Console]::In.ReadToEnd()
+    $out = ($hookInput | & uv run --quiet $dg subagent-start 2>$errFile) -join "`n"
+    if ($LASTEXITCODE -eq 0) {
+        if ($out) { $out }
+    } else {
+        @{ hookSpecificOutput = @{ hookEventName = 'SubagentStart'
+                                   additionalContext = (Unavailable) } } | ConvertTo-Json -Compress
+    }
+    Remove-Item -LiteralPath $errFile -Force -ErrorAction SilentlyContinue
+    exit 0
+}
+$notice = $false
+$brief = (& uv run --quiet $dg brief --project $PWD --only-if-relevant 2>$errFile) -join "`n"
+if ($LASTEXITCODE -ne 0) { $brief = Unavailable; $notice = $true }
 
 # An empty file: the statusline reads only the name, never the contents.
 # Only a real brief lights the badge; orders alone are not a primed project.
 if (-not [string]::IsNullOrWhiteSpace($brief)) {
-    New-Item -ItemType Directory -Path $markDir -Force -ErrorAction SilentlyContinue | Out-Null
-    New-Item -ItemType File -Path $mark -Force -ErrorAction SilentlyContinue | Out-Null
+    if (-not $notice) {
+        New-Item -ItemType Directory -Path $markDir -Force -ErrorAction SilentlyContinue | Out-Null
+        New-Item -ItemType File -Path $mark -Force -ErrorAction SilentlyContinue | Out-Null
+    }
     $brief += "`n`n"
 } else {
     $brief = ''
 }
 
-$orders = (& uv run --quiet $dg standing-orders 2>$null) -join "`n"
-if ($LASTEXITCODE -ne 0) { exit 0 }
+$orders = (& uv run --quiet $dg standing-orders 2>$errFile) -join "`n"
+if ($LASTEXITCODE -ne 0) { $orders = Unavailable }
+Remove-Item -LiteralPath $errFile -Force -ErrorAction SilentlyContinue
 
 # Same two layouts as the CLI lookup above: a sibling skills directory in the
 # repository, or the agent's own skills root when acr realize placed it.

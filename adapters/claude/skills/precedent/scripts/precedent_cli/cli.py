@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import pathlib
 
-from .admin import cmd_cypher, cmd_export, cmd_init, cmd_standing_orders
+from .admin import cmd_cypher, cmd_export, cmd_init, cmd_standing_orders, cmd_subagent_start
 import precedent_cli
 from .core import HOME, SCOPES, Store
 from .maintain import cmd_maintain, cmd_merge_project, cmd_tag
@@ -139,6 +139,10 @@ def build_parser() -> argparse.ArgumentParser:
                         help="print the standing orders every adapter appends after a brief")
     so.set_defaults(writes=False, fn=cmd_standing_orders)
 
+    sub.add_parser("subagent-start",
+                   help="SubagentStart hook: the brief and orders as hook JSON, read from stdin"
+                   ).set_defaults(writes=False, fn=cmd_subagent_start)
+
     cy = sub.add_parser("cypher", help="escape hatch")
     cy.add_argument("query")
     cy.add_argument("--params", default="")
@@ -172,7 +176,7 @@ def wants_write(a) -> bool:
 
 def main(argv=None) -> None:
     a = build_parser().parse_args(argv)
-    if a.cmd in ("init", "standing-orders"):
+    if a.cmd in ("init", "standing-orders", "subagent-start"):
         a.fn(a)
         return
     with Store(pathlib.Path(a.home), write=wants_write(a)) as s:

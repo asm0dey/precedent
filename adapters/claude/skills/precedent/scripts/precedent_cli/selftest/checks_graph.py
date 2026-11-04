@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import pathlib
 
-from ..core import SCHEMA, Store, today
+from ..core import JOURNAL, SCHEMA, Store, today
 from ..maintain import cmd_maintain, contradictions_in, liveness
 from ..projects import tag_topics, attach_tags, contained, effective_tags, enclosing, neighbours, normalised, project_info, tags_of, topic_vocabulary, upsert_project
 from ..reading import cmd_check, worth_backfilling
@@ -588,6 +588,45 @@ def _check_principle_retire() -> None:
         principle(ps, statement="y")
         assert state(ps) == {"r": None, "b": None}, "re-recording must reactivate"
         assert governs(ps, tmp_home)
+
+
+def _check_principle_amend() -> None:
+    """Rewording a principle without --topic keeps its topics, so it must not
+    warn that they are gone, and its journal line must not claim "no topics"
+    (issue #34). Own throwaway store: cmd_principle journals."""
+    import argparse as _argparse
+    import contextlib
+    import io
+    import json
+    import tempfile
+
+    def principle(ps, **kw) -> str:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cmd_principle(_argparse.Namespace(**{"derived_from": "", "topic": "",
+                                                 "retire": False, "because": "", **kw}), ps)
+        return out.getvalue()
+
+    def topics(ps, pid):
+        return [r["n"] for r in ps.q("""MATCH (:Principle {id:$id})-[:ABOUT]->(t:Topic)
+                                        RETURN t.name AS n""", {"id": pid})]
+
+    warning = "will never surface"
+    with tempfile.TemporaryDirectory() as tmp_home, \
+            Store(pathlib.Path(tmp_home), write=True) as ps:
+        assert warning not in principle(ps, id="p1", topic="alpha", statement="Always prefer X.")
+        out = principle(ps, id="p1", statement="Prefer X when it fits.")
+        assert warning not in out, f"an amendment keeps its topics, so no warning:\n{out}"
+        assert topics(ps, "p1") == ["alpha"], topics(ps, "p1")
+        last = json.loads((pathlib.Path(tmp_home) / JOURNAL).read_text(
+            encoding="utf-8").splitlines()[-1])
+        assert "topics" not in last, f"an amendment without --topic must not journal topics: {last}"
+        replay_entry(ps, {**last, "ts": today()})
+        assert topics(ps, "p1") == ["alpha"], "replaying the amendment must keep the topics"
+
+        assert warning in principle(ps, id="p2", statement="No topic at all.")
+        assert warning in principle(ps, id="p2", statement="Still no topic."), \
+            "a principle that still has no topic is still never surfaced"
 
 
 def _check_maintain(s: Store) -> None:

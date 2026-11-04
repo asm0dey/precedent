@@ -11,6 +11,17 @@
             "timeout": 20 }
         ]
       }
+    ],
+    "SubagentStart": [
+      {
+        "matcher": "*",
+        "hooks": [
+          { "type": "command",
+            "command": "\"$CLAUDE_PLUGIN_ROOT/adapters/claude/hooks/session-start.sh\" --subagent",
+            "shell": "bash",
+            "timeout": 20 }
+        ]
+      }
     ]
   }
 }

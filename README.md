@@ -189,6 +189,12 @@ knowing what you decided here and in comparable projects. It stays quiet where t
 nothing to say, so empty directories cost nothing. ACR wires it for you; the plugin ships it in
 `hooks.json`; the symlink route needs a few lines in `~/.claude/settings.json`.
 
+Subagents never see a session's hook output, so the plugin's `hooks.json` also runs the same
+hook on `SubagentStart` (`session-start.sh --subagent`): every subagent gets the brief for its
+own working directory and the standing orders, except read-only helpers such as `Explore`.
+ACR installs have no subagent hook; there, copy the precedents that bind the task into each
+subagent prompt.
+
 In Claude Code builds with function hooks (mods), the plugin also loads
 `adapters/claude/hooks/register.ts`, which turns two standing orders from reminders into
 behaviour: a Bash `cd` into another project attaches that project's brief, and a manifest edit

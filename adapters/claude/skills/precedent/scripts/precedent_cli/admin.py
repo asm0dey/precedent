@@ -140,6 +140,53 @@ def cmd_standing_orders(a) -> None:
         print(f"- {r['stmt']}  #{r['id']}")
 
 
+# Read-only helpers that do not act on decisions; the brief is ~10 KB of
+# tokens they would only carry. Filtered here because a hook matcher has no
+# documented way to exclude an agent type.
+SKIP_AGENT_TYPES = {"Explore", "claude-code-guide", "statusline-setup"}
+
+
+def cmd_subagent_start(a) -> None:
+    """Claude Code's SubagentStart hook: give the subagent the brief and the
+    standing orders the session got, which it would otherwise never see.
+
+    Reads the hook's JSON on stdin and answers with hookSpecificOutput JSON,
+    the only output that event adds as context. Never fails the subagent:
+    unreadable input prints nothing, and a brief that fails prints the same
+    one-line notice as session-start.sh.
+    """
+    import contextlib
+    import io
+    import sys
+    from .cli import main
+
+    try:
+        hook = json.loads(sys.stdin.read())
+    except ValueError:
+        return
+    if not isinstance(hook, dict) or hook.get("agent_type") in SKIP_AGENT_TYPES:
+        return
+    brief = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(brief):
+            main(["--home", a.home, "brief", "--project", hook.get("cwd") or os.getcwd(),
+                  "--only-if-relevant"])
+        text = brief.getvalue()
+    except (SystemExit, Exception) as exc:  # NOSONAR python:S5754
+        reason = str(exc).strip().splitlines()[0] if str(exc).strip() else type(exc).__name__
+        text = f'PRECEDENT unavailable: {reason} — rerun: uv run "{CLI}" brief --project .'
+    orders = io.StringIO()
+    with contextlib.redirect_stdout(orders):
+        cmd_standing_orders(a)
+    skill = CLI.parent.parent / "SKILL.md"
+    context = ("PRECEDENT — your recorded decisions, loaded for this subagent.\n\n"
+               + (text.rstrip("\n") + "\n\n" if text.strip() else "")
+               + orders.getvalue()
+               + (f"Full guidance: {skill}\n" if skill.is_file() else ""))
+    print(json.dumps({"hookSpecificOutput": {"hookEventName": "SubagentStart",
+                                             "additionalContext": context}}))
+
+
 def cmd_cypher(a, s: Store) -> None:
     for row in s.q(a.query, json.loads(a.params) if a.params else None):
         # One JSON object per line, so hooks and scripts can parse it.

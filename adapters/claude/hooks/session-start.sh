@@ -20,8 +20,10 @@ HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 # the directory this hook primed. Dropping it first and writing it back only
 # on a successful, non-empty brief means every early exit below — no CLI, no
 # uv, nothing to say — also clears a badge left by an earlier session.
+# A subagent (--subagent) is not a session: its run must leave the badge as
+# the session left it.
 MARK="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.precedent-primed/${PWD//[^A-Za-z0-9-]/_}"
-rm -f "$MARK" 2>/dev/null
+[[ ${1-} == --subagent ]] || rm -f "$MARK" 2>/dev/null
 DG=""
 for candidate in "$HERE/../skills/precedent/scripts/precedent.py" \
                  "$HERE"/../../skills/*precedent/scripts/precedent.py; do
@@ -42,18 +44,58 @@ TIMEOUT=""
 for t in timeout gtimeout; do
   if command -v "$t" >/dev/null 2>&1; then TIMEOUT="$t"; break; fi
 done
-BRIEF=$(${TIMEOUT:+$TIMEOUT 20} uv run --quiet "$DG" brief --project "$PWD" --only-if-relevant 2>/dev/null) || exit 0
+
+#
+# A failure still exits 0 — a session must never be blocked — but it says so
+# in one line: printing nothing made a broken store look like an empty one,
+# and the user stopped getting precedents without noticing (issue #33).
+ERR=$(mktemp 2>/dev/null) || ERR=/dev/null
+trap '[[ $ERR != /dev/null ]] && command rm -f "$ERR"' EXIT
+unavailable() {  # <exit status> <what timed out>
+  local status=$1 what=$2 reason
+  if [[ $status -eq 124 && -n "$TIMEOUT" ]]; then
+    reason="$what timed out after 20s"
+  else
+    reason=$(grep -m1 -v '^[[:space:]]*$' "$ERR" 2>/dev/null)
+    reason=${reason:-"exit status $status"}
+  fi
+  printf 'PRECEDENT unavailable: %s — rerun: uv run "%s" brief --project .' "$reason" "$DG"
+}
+
+# SubagentStart (hooks.json passes --subagent): the CLI reads the hook's JSON
+# on stdin, for the subagent's own cwd, and answers in the hook JSON that
+# event requires — plain stdout is not added as context there. A failure
+# before Python answers (uv, the timeout) gets the same notice, as JSON.
+if [[ ${1-} == --subagent ]]; then
+  OUT=$(${TIMEOUT:+$TIMEOUT 20} uv run --quiet "$DG" subagent-start 2>"$ERR")
+  status=$?
+  if [[ $status -eq 0 ]]; then
+    [[ -z "$OUT" ]] || printf '%s\n' "$OUT"
+  else
+    notice=$(unavailable "$status" subagent-start)
+    notice=${notice//\\/\\\\}
+    printf '{"hookSpecificOutput": {"hookEventName": "SubagentStart", "additionalContext": "%s"}}\n' \
+      "${notice//\"/\\\"}"
+  fi
+  exit 0
+fi
+BRIEF=$(${TIMEOUT:+$TIMEOUT 20} uv run --quiet "$DG" brief --project "$PWD" --only-if-relevant 2>"$ERR")
+status=$?
+if [[ $status -ne 0 ]]; then
+  BRIEF=$(unavailable "$status" brief)
+  NOTICE=1
+fi
 
 # An empty file: the statusline reads only the name, never the contents.
 # Only a real brief lights the badge; orders alone are not a primed project.
 if [[ -n "$BRIEF" ]]; then
-  mkdir -p "${MARK%/*}" 2>/dev/null && : > "$MARK" 2>/dev/null
+  [[ -n "${NOTICE-}" ]] || { mkdir -p "${MARK%/*}" 2>/dev/null && : > "$MARK" 2>/dev/null; }
   BRIEF+=$'\n\n'
 fi
 
 # The standing orders come from the CLI so this hook, SKILL.md and every
 # other adapter cannot drift apart.
-ORDERS=$(uv run --quiet "$DG" standing-orders 2>/dev/null) || exit 0
+ORDERS=$(uv run --quiet "$DG" standing-orders 2>"$ERR") || ORDERS=$(unavailable $? standing-orders)
 
 # The guidance pointer needs the same two-layout treatment as the CLI above:
 # in the repository the main skill is a sibling directory, while acr realize
