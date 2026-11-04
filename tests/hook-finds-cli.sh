@@ -102,4 +102,28 @@ else
   echo "ok: no-store prints the orders"
 fi
 
+# A brief that fails must say so (issue #33): silence reads as "nothing
+# recorded here", and the user stops getting precedents without noticing.
+assert_unavailable() {  # <case name> <expected notice text> [env assignments...]
+  local name=$1 want=$2 out
+  shift 2
+  out=$(cd "$EMPTY" && env "$@" bash "$HOOK") || { echo "FAIL: $name — hook exited non-zero" >&2; fail=1; return; }
+  if ! printf '%s' "$out" | grep -qF "$want"; then
+    echo "FAIL: $name — no '$want' line:" >&2; printf '%s\n' "$out" >&2; fail=1
+  elif ! printf '%s' "$out" | grep -q "Standing orders"; then
+    echo "FAIL: $name — the orders must still print" >&2; fail=1
+  else
+    echo "ok: $name says the brief is unavailable"
+  fi
+}
+mkdir -p "$WORK/junk"
+printf 'not a database' > "$WORK/junk/graph.db"
+assert_unavailable unreadable-store "PRECEDENT unavailable: " PRECEDENT_HOME="$WORK/junk"
+
+# GNU timeout exits 124 and prints nothing: a fake one stands in for a slow uv.
+mkdir -p "$WORK/fakebin"
+printf '#!/bin/sh\nexit 124\n' > "$WORK/fakebin/timeout"
+chmod +x "$WORK/fakebin/timeout"
+assert_unavailable timeout "PRECEDENT unavailable: brief timed out after 20s" PATH="$WORK/fakebin:$PATH"
+
 exit "$fail"

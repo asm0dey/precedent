@@ -46,21 +46,35 @@ $dg = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
 if (-not $dg) { exit 0 }
 if (-not (Get-Command uv -ErrorAction SilentlyContinue)) { exit 0 }
 
-$brief = (& uv run --quiet $dg brief --project $PWD --only-if-relevant 2>$null) -join "`n"
-if ($LASTEXITCODE -ne 0) { exit 0 }
+# A failure still exits 0 but says so in one line, as in session-start.sh:
+# printing nothing made a broken store look like an empty one (issue #33).
+# This twin has no timeout guard, so there is no timed-out case to report.
+$errFile = [System.IO.Path]::GetTempFileName()
+function Unavailable {
+    $reason = Get-Content -LiteralPath $errFile -ErrorAction SilentlyContinue |
+        Where-Object { $_.Trim() } | Select-Object -First 1
+    if (-not $reason) { $reason = "exit status $LASTEXITCODE" }
+    "PRECEDENT unavailable: $reason — rerun: uv run `"$dg`" brief --project ."
+}
+$notice = $false
+$brief = (& uv run --quiet $dg brief --project $PWD --only-if-relevant 2>$errFile) -join "`n"
+if ($LASTEXITCODE -ne 0) { $brief = Unavailable; $notice = $true }
 
 # An empty file: the statusline reads only the name, never the contents.
 # Only a real brief lights the badge; orders alone are not a primed project.
 if (-not [string]::IsNullOrWhiteSpace($brief)) {
-    New-Item -ItemType Directory -Path $markDir -Force -ErrorAction SilentlyContinue | Out-Null
-    New-Item -ItemType File -Path $mark -Force -ErrorAction SilentlyContinue | Out-Null
+    if (-not $notice) {
+        New-Item -ItemType Directory -Path $markDir -Force -ErrorAction SilentlyContinue | Out-Null
+        New-Item -ItemType File -Path $mark -Force -ErrorAction SilentlyContinue | Out-Null
+    }
     $brief += "`n`n"
 } else {
     $brief = ''
 }
 
-$orders = (& uv run --quiet $dg standing-orders 2>$null) -join "`n"
-if ($LASTEXITCODE -ne 0) { exit 0 }
+$orders = (& uv run --quiet $dg standing-orders 2>$errFile) -join "`n"
+if ($LASTEXITCODE -ne 0) { $orders = Unavailable }
+Remove-Item -LiteralPath $errFile -Force -ErrorAction SilentlyContinue
 
 # Same two layouts as the CLI lookup above: a sibling skills directory in the
 # repository, or the agent's own skills root when acr realize placed it.

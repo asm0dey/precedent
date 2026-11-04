@@ -42,18 +42,39 @@ TIMEOUT=""
 for t in timeout gtimeout; do
   if command -v "$t" >/dev/null 2>&1; then TIMEOUT="$t"; break; fi
 done
-BRIEF=$(${TIMEOUT:+$TIMEOUT 20} uv run --quiet "$DG" brief --project "$PWD" --only-if-relevant 2>/dev/null) || exit 0
+#
+# A failure still exits 0 — a session must never be blocked — but it says so
+# in one line: printing nothing made a broken store look like an empty one,
+# and the user stopped getting precedents without noticing (issue #33).
+ERR=$(mktemp 2>/dev/null) || ERR=/dev/null
+trap '[[ $ERR != /dev/null ]] && command rm -f "$ERR"' EXIT
+unavailable() {  # <exit status> <what timed out>
+  local reason
+  if [[ $1 -eq 124 && -n "$TIMEOUT" ]]; then
+    reason="$2 timed out after 20s"
+  else
+    reason=$(grep -m1 -v '^[[:space:]]*$' "$ERR" 2>/dev/null)
+    reason=${reason:-"exit status $1"}
+  fi
+  printf 'PRECEDENT unavailable: %s — rerun: uv run "%s" brief --project .' "$reason" "$DG"
+}
+BRIEF=$(${TIMEOUT:+$TIMEOUT 20} uv run --quiet "$DG" brief --project "$PWD" --only-if-relevant 2>"$ERR")
+status=$?
+if [[ $status -ne 0 ]]; then
+  BRIEF=$(unavailable "$status" brief)
+  NOTICE=1
+fi
 
 # An empty file: the statusline reads only the name, never the contents.
 # Only a real brief lights the badge; orders alone are not a primed project.
 if [[ -n "$BRIEF" ]]; then
-  mkdir -p "${MARK%/*}" 2>/dev/null && : > "$MARK" 2>/dev/null
+  [[ -n "${NOTICE-}" ]] || { mkdir -p "${MARK%/*}" 2>/dev/null && : > "$MARK" 2>/dev/null; }
   BRIEF+=$'\n\n'
 fi
 
 # The standing orders come from the CLI so this hook, SKILL.md and every
 # other adapter cannot drift apart.
-ORDERS=$(uv run --quiet "$DG" standing-orders 2>/dev/null) || exit 0
+ORDERS=$(uv run --quiet "$DG" standing-orders 2>"$ERR") || ORDERS=$(unavailable $? standing-orders)
 
 # The guidance pointer needs the same two-layout treatment as the CLI above:
 # in the repository the main skill is a sibling directory, while acr realize
